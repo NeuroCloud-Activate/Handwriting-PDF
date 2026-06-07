@@ -9,8 +9,6 @@ const {
   requestUrl
 } = require("obsidian");
 
-const { PDFDocument, StandardFonts, rgb } = getPdfLib();
-
 const COMPATIBLE_MODELS = [
   {
     id: "gemini-3.1-flash-lite",
@@ -89,11 +87,17 @@ const NOTE_TOGGLE_SETTINGS = [
 ];
 
 const GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models";
+let cachedPdfLib = null;
 
 function getPdfLib() {
-  if (typeof PDFLib !== "undefined") return PDFLib;
-  if (typeof module !== "undefined" && module.exports?.PDFDocument) return module.exports;
-  return require("./pdf-lib.min.js");
+  if (cachedPdfLib) return cachedPdfLib;
+  if (typeof globalThis !== "undefined" && globalThis.PDFLib) {
+    cachedPdfLib = globalThis.PDFLib;
+    return cachedPdfLib;
+  }
+
+  cachedPdfLib = require("./pdf-lib.min.js");
+  return cachedPdfLib;
 }
 
 class HandwritingPdfPlugin extends Plugin {
@@ -108,7 +112,7 @@ class HandwritingPdfPlugin extends Plugin {
       await this.saveSettings();
     }
 
-    await this.ensureOutputFolder();
+    this.deferOutputFolderSetup();
 
     this.addSettingTab(new HandwritingPdfSettingTab(this.app, this));
 
@@ -143,6 +147,20 @@ class HandwritingPdfPlugin extends Plugin {
   async ensureOutputFolder() {
     const folder = normalizeOutputFolder(this.settings.outputFolder);
     if (folder) await ensureFolder(this.app, folder);
+  }
+
+  deferOutputFolderSetup() {
+    const createFolder = () => {
+      this.ensureOutputFolder().catch((error) => {
+        console.warn("Handwriting PDF could not create the output folder during startup.", error);
+      });
+    };
+
+    if (typeof this.app.workspace.onLayoutReady === "function") {
+      this.app.workspace.onLayoutReady(createFolder);
+    } else {
+      createFolder();
+    }
   }
 
   async createNoteFromPdf(pdfFile) {
@@ -889,6 +907,7 @@ function isTableSeparatorRow(row) {
 }
 
 async function createOcrOverlayPdf(sourcePdfData, result, mode) {
+  const { PDFDocument, StandardFonts, rgb } = getPdfLib();
   const pdfDoc = await PDFDocument.load(sourcePdfData);
   const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
   const pages = pdfDoc.getPages();
@@ -902,17 +921,17 @@ async function createOcrOverlayPdf(sourcePdfData, result, mode) {
     const lines = mode === "positioned" ? getPositionedLines(ocrPage) : [];
 
     if (lines.length) {
-      drawPositionedInvisibleText({ page, font, lines, pageWidth: width, pageHeight: height });
+      drawPositionedInvisibleText({ page, font, lines, pageWidth: width, pageHeight: height, rgb });
     } else {
       const text = ocrPage?.text || pageTextFallback[pageIndex] || result.markdown || "";
-      drawSearchableInvisibleText({ page, font, text, pageWidth: width, pageHeight: height });
+      drawSearchableInvisibleText({ page, font, text, pageWidth: width, pageHeight: height, rgb });
     }
   }
 
   return pdfDoc.save({ useObjectStreams: false });
 }
 
-function drawPositionedInvisibleText({ page, font, lines, pageWidth, pageHeight }) {
+function drawPositionedInvisibleText({ page, font, lines, pageWidth, pageHeight, rgb }) {
   for (const line of lines) {
     const text = sanitizePdfText(line.text);
     if (!text) continue;
@@ -934,7 +953,7 @@ function drawPositionedInvisibleText({ page, font, lines, pageWidth, pageHeight 
   }
 }
 
-function drawSearchableInvisibleText({ page, font, text, pageWidth, pageHeight }) {
+function drawSearchableInvisibleText({ page, font, text, pageWidth, pageHeight, rgb }) {
   const lines = wrapTextForPdf(sanitizePdfText(text), 110);
   const size = 6;
   const lineHeight = size * 1.25;

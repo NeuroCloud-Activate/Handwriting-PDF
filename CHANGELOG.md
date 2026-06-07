@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.15
+
+- Improved plugin launch reliability by deferring output-folder creation until Obsidian layout readiness.
+- Deferred `pdf-lib` loading until the optional OCR-enhanced PDF path actually needs it.
+- Kept startup failures from output-folder setup from preventing the plugin from loading.
+
 ## 0.1.14
 
 - Reinforced the AI-mediated cleanup path so generated Markdown remains readable, structured, and polished.

@@ -1,6 +1,6 @@
 {
   "name": "handwriting-pdf",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "description": "Obsidian plugin for turning handwritten PDF notes into formatted Markdown using Gemini.",
   "main": "main.js",
   "scripts": {
