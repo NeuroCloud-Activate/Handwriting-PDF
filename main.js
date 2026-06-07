@@ -33,7 +33,7 @@ function getPdfLib() {
   return require("./pdf-lib.min.js");
 }
 
-module.exports = class HandwritingPdfPlugin extends Plugin {
+class HandwritingPdfPlugin extends Plugin {
   async onload() {
     const savedSettings = await this.loadData();
     this.settings = Object.assign({}, DEFAULT_SETTINGS, savedSettings);
@@ -165,28 +165,49 @@ module.exports = class HandwritingPdfPlugin extends Plugin {
   }
 
   async writeOcrPdf(sourcePdfFile, sourcePdfData, result, ocrDetail) {
+    const { folder, outputPath } = await this.getOcrPdfTarget(sourcePdfFile, result);
+    const ocrPdfBytes = await createOcrOverlayPdf(sourcePdfData, result, ocrDetail);
+
+    if (folder) await ensureFolder(this.app, folder);
+    await this.writeBinaryPdf(outputPath, ocrPdfBytes);
+
+    const created = this.app.vault.getAbstractFileByPath(outputPath);
+    return created instanceof TFile ? created : new TFile(outputPath);
+  }
+
+  async getOcrPdfTarget(sourcePdfFile, result) {
     const date = normalizeDate(result.date) || window.moment().format("YYYY-MM-DD");
     const title = sanitizeTitle(result.title || sourcePdfFile.basename);
     const sourceTitle = sanitizeTitle(sourcePdfFile.basename);
     const folder = normalizeOutputFolder(this.settings.outputFolder);
     const outputName = `${date} - ${title} - ${sourceTitle} OCR.pdf`;
-    const outputPath = await this.getAvailablePathForExtension(folder ? `${folder}/${outputName}` : outputName, "pdf");
-    const ocrPdfBytes = await createOcrOverlayPdf(sourcePdfData, result, ocrDetail);
+    const requestedPath = folder ? `${folder}/${outputName}` : outputName;
 
-    if (folder) await ensureFolder(this.app, folder);
+    return {
+      folder,
+      outputPath: await this.getAvailablePathForExtension(requestedPath, "pdf")
+    };
+  }
+
+  async writeBinaryPdf(outputPath, bytes) {
+    const content = uint8ArrayToArrayBuffer(bytes);
     const existing = this.app.vault.getAbstractFileByPath(outputPath);
+
     if (existing instanceof TFile && this.app.vault.modifyBinary) {
-      await this.app.vault.modifyBinary(existing, uint8ArrayToArrayBuffer(ocrPdfBytes));
-    } else if (!existing && this.app.vault.createBinary) {
-      await this.app.vault.createBinary(outputPath, uint8ArrayToArrayBuffer(ocrPdfBytes));
-    } else if (existing) {
-      throw new Error(`OCR PDF already exists and cannot be modified: ${outputPath}`);
-    } else {
-      throw new Error("This Obsidian version does not support binary PDF creation.");
+      await this.app.vault.modifyBinary(existing, content);
+      return;
     }
 
-    const created = this.app.vault.getAbstractFileByPath(outputPath);
-    return created instanceof TFile ? created : new TFile(outputPath);
+    if (!existing && this.app.vault.createBinary) {
+      await this.app.vault.createBinary(outputPath, content);
+      return;
+    }
+
+    if (existing) {
+      throw new Error(`OCR PDF already exists and cannot be modified: ${outputPath}`);
+    }
+
+    throw new Error("This Obsidian version does not support binary PDF creation.");
   }
 
   async writeMarkdownNote(pdfFile, embeddedPdfFile, result) {
@@ -231,7 +252,7 @@ module.exports = class HandwritingPdfPlugin extends Plugin {
     }
     return `${withoutExt} ${index}.${extension}`;
   }
-};
+}
 
 class HandwritingPdfSettingTab extends PluginSettingTab {
   constructor(app, plugin) {
@@ -245,133 +266,141 @@ class HandwritingPdfSettingTab extends PluginSettingTab {
     containerEl.addClass("handwriting-pdf-settings");
 
     containerEl.createEl("h2", { text: "Handwriting PDF" });
+    this.renderGeminiSettings(containerEl);
+    this.renderOutputSettings(containerEl);
+    this.renderSummarySettings(containerEl);
+    this.renderOcrSettings(containerEl);
+    this.renderNoteSettings(containerEl);
+  }
 
-    new Setting(containerEl)
-      .setName("Gemini API key")
-      .setDesc("Stored locally in this vault's plugin data.")
-      .addText((text) => {
-        text.inputEl.type = "password";
-        text
-          .setPlaceholder("API key")
-          .setValue(this.plugin.settings.apiKey)
-          .onChange(async (value) => {
-            this.plugin.settings.apiKey = value.trim();
-            await this.plugin.saveSettings();
-          });
-      });
+  renderGeminiSettings(containerEl) {
+    addTextSetting(containerEl, {
+      name: "Gemini API key",
+      description: "Stored locally in this vault's plugin data.",
+      placeholder: "API key",
+      value: this.plugin.settings.apiKey,
+      password: true,
+      onChange: async (value) => {
+        this.plugin.settings.apiKey = value.trim();
+        await this.plugin.saveSettings();
+      }
+    });
 
-    new Setting(containerEl)
-      .setName("Gemini model")
-      .setDesc("Use a Gemini model that accepts PDF input and returns text.")
-      .addText((text) =>
-        text
-          .setPlaceholder("gemini-3.1-flash-lite")
-          .setValue(this.plugin.settings.model)
-          .onChange(async (value) => {
-            this.plugin.settings.model = value.trim() || DEFAULT_SETTINGS.model;
-            await this.plugin.saveSettings();
-          })
-      );
+    addTextSetting(containerEl, {
+      name: "Gemini model",
+      description: "Use a Gemini model that accepts PDF input and returns text.",
+      placeholder: "gemini-3.1-flash-lite",
+      value: this.plugin.settings.model,
+      onChange: async (value) => {
+        this.plugin.settings.model = value.trim() || DEFAULT_SETTINGS.model;
+        await this.plugin.saveSettings();
+      }
+    });
+  }
 
-    new Setting(containerEl)
-      .setName("Output folder")
-      .setDesc("Generated notes are created here. Leave blank to create notes at the vault root.")
-      .addText((text) =>
-        text
-          .setPlaceholder(DEFAULT_SETTINGS.outputFolder)
-          .setValue(this.plugin.settings.outputFolder)
-          .onChange(async (value) => {
-            this.plugin.settings.outputFolder = value.trim();
-            await this.plugin.saveSettings();
-            await this.plugin.ensureOutputFolder();
-          })
-      );
+  renderOutputSettings(containerEl) {
+    addTextSetting(containerEl, {
+      name: "Output folder",
+      description: "Generated notes are created here. Leave blank to create notes at the vault root.",
+      placeholder: DEFAULT_SETTINGS.outputFolder,
+      value: this.plugin.settings.outputFolder,
+      onChange: async (value) => {
+        this.plugin.settings.outputFolder = value.trim();
+        await this.plugin.saveSettings();
+        await this.plugin.ensureOutputFolder();
+      }
+    });
+  }
 
-    new Setting(containerEl)
-      .setName("Add summary")
-      .setDesc("Add a concise summary before the transcription.")
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.includeSummary)
-          .onChange(async (value) => {
-            this.plugin.settings.includeSummary = value;
-            await this.plugin.saveSettings();
-          })
-      );
+  renderSummarySettings(containerEl) {
+    addBoundToggleSettings(containerEl, this.plugin, [
+      {
+        key: "includeSummary",
+        name: "Add summary",
+        description: "Add a concise summary before the transcription."
+      }
+    ]);
 
-    new Setting(containerEl)
-      .setName("Summary word limit")
-      .setDesc("Default is 200 words.")
-      .addText((text) =>
-        text
-          .setPlaceholder("200")
-          .setValue(String(this.plugin.settings.summaryWordLimit))
-          .onChange(async (value) => {
-            const parsed = Number.parseInt(value, 10);
-            this.plugin.settings.summaryWordLimit = Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_SETTINGS.summaryWordLimit;
-            await this.plugin.saveSettings();
-          })
-      );
+    addTextSetting(containerEl, {
+      name: "Summary word limit",
+      description: "Default is 200 words.",
+      placeholder: "200",
+      value: String(this.plugin.settings.summaryWordLimit),
+      onChange: async (value) => {
+        const parsed = Number.parseInt(value, 10);
+        this.plugin.settings.summaryWordLimit = Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_SETTINGS.summaryWordLimit;
+        await this.plugin.saveSettings();
+      }
+    });
+  }
 
-    new Setting(containerEl)
-      .setName("Create OCR-enhanced PDF")
-      .setDesc("When enabled, creates a copy of the PDF with an invisible Gemini text layer and embeds that copy in the generated note.")
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.createOcrPdf)
-          .onChange(async (value) => {
-            this.plugin.settings.createOcrPdf = value;
-            await this.plugin.saveSettings();
-          })
-      );
+  renderOcrSettings(containerEl) {
+    addBoundToggleSettings(containerEl, this.plugin, [
+      {
+        key: "createOcrPdf",
+        name: "Create OCR-enhanced PDF",
+        description: "When enabled, creates a copy of the PDF with an invisible Gemini text layer and embeds that copy in the generated note."
+      },
+      {
+        key: "autoDetectTextLayer",
+        name: "Auto-detect existing PDF text layer",
+        description: "When enabled, image-only PDFs request positioned line data, while PDFs that already have a text layer use faster page text. When disabled, OCR-enhanced PDFs use faster page text unless positioned layout is forced."
+      },
+      {
+        key: "alwaysRequestPositionedOcr",
+        name: "Always request positioned OCR layout",
+        description: "Disabled by default. When enabled, Gemini returns page text and line coordinates for every PDF, even when an existing text layer is detected."
+      }
+    ]);
+  }
 
-    new Setting(containerEl)
-      .setName("Auto-detect existing PDF text layer")
-      .setDesc("When enabled, image-only PDFs request positioned line data, while PDFs that already have a text layer use faster page text. When disabled, OCR-enhanced PDFs use faster page text unless positioned layout is forced.")
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.autoDetectTextLayer)
-          .onChange(async (value) => {
-            this.plugin.settings.autoDetectTextLayer = value;
-            await this.plugin.saveSettings();
-          })
-      );
+  renderNoteSettings(containerEl) {
+    addBoundToggleSettings(containerEl, this.plugin, [
+      {
+        key: "includeFrontmatter",
+        name: "Include frontmatter",
+        description: "Add source PDF and model metadata to generated notes."
+      },
+      {
+        key: "overwriteExisting",
+        name: "Overwrite existing note names",
+        description: "When disabled, duplicate names receive a numeric suffix."
+      }
+    ]);
+  }
+}
 
-    new Setting(containerEl)
-      .setName("Always request positioned OCR layout")
-      .setDesc("Disabled by default. When enabled, Gemini returns page text and line coordinates for every PDF, even when an existing text layer is detected.")
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.alwaysRequestPositionedOcr)
-          .onChange(async (value) => {
-            this.plugin.settings.alwaysRequestPositionedOcr = value;
-            await this.plugin.saveSettings();
-          })
-      );
+function addTextSetting(containerEl, { name, description, placeholder, value, password = false, onChange }) {
+  new Setting(containerEl)
+    .setName(name)
+    .setDesc(description)
+    .addText((text) => {
+      if (password) text.inputEl.type = "password";
+      text
+        .setPlaceholder(placeholder)
+        .setValue(value)
+        .onChange(onChange);
+    });
+}
 
-    new Setting(containerEl)
-      .setName("Include frontmatter")
-      .setDesc("Add source PDF and model metadata to generated notes.")
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.includeFrontmatter)
-          .onChange(async (value) => {
-            this.plugin.settings.includeFrontmatter = value;
-            await this.plugin.saveSettings();
-          })
-      );
+function addToggleSetting(containerEl, { name, description, value, onChange }) {
+  new Setting(containerEl)
+    .setName(name)
+    .setDesc(description)
+    .addToggle((toggle) => toggle.setValue(value).onChange(onChange));
+}
 
-    new Setting(containerEl)
-      .setName("Overwrite existing note names")
-      .setDesc("When disabled, duplicate names receive a numeric suffix.")
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.overwriteExisting)
-          .onChange(async (value) => {
-            this.plugin.settings.overwriteExisting = value;
-            await this.plugin.saveSettings();
-          })
-      );
+function addBoundToggleSettings(containerEl, plugin, settings) {
+  for (const setting of settings) {
+    addToggleSetting(containerEl, {
+      name: setting.name,
+      description: setting.description,
+      value: plugin.settings[setting.key],
+      onChange: async (value) => {
+        plugin.settings[setting.key] = value;
+        await plugin.saveSettings();
+      }
+    });
   }
 }
 
@@ -429,49 +458,51 @@ function buildResponseSchema(ocrDetail) {
     required: ["title", "date", "summary", "markdown"]
   };
 
-  if (ocrDetail === "searchable") {
-    schema.properties.pages = {
-      type: "ARRAY",
-      items: {
-        type: "OBJECT",
-        properties: {
-          pageNumber: { type: "NUMBER" },
-          text: { type: "STRING" }
-        },
-        required: ["pageNumber", "text"]
-      }
-    };
-  }
-
-  if (ocrDetail === "positioned") {
-    schema.properties.pages = {
-      type: "ARRAY",
-      items: {
-        type: "OBJECT",
-        properties: {
-          pageNumber: { type: "NUMBER" },
-          text: { type: "STRING" },
-          lines: {
-            type: "ARRAY",
-            items: {
-              type: "OBJECT",
-              properties: {
-                text: { type: "STRING" },
-                x: { type: "NUMBER" },
-                y: { type: "NUMBER" },
-                width: { type: "NUMBER" },
-                height: { type: "NUMBER" }
-              },
-              required: ["text", "x", "y", "width", "height"]
-            }
-          }
-        },
-        required: ["pageNumber", "text", "lines"]
-      }
-    };
-  }
+  const pageSchema = buildPageResponseSchema(ocrDetail);
+  if (pageSchema) schema.properties.pages = pageSchema;
 
   return schema;
+}
+
+function buildPageResponseSchema(ocrDetail) {
+  if (!["searchable", "positioned"].includes(ocrDetail)) return null;
+
+  const properties = {
+    pageNumber: { type: "NUMBER" },
+    text: { type: "STRING" }
+  };
+  const required = ["pageNumber", "text"];
+
+  if (ocrDetail === "positioned") {
+    properties.lines = buildLineResponseSchema();
+    required.push("lines");
+  }
+
+  return {
+    type: "ARRAY",
+    items: {
+      type: "OBJECT",
+      properties,
+      required
+    }
+  };
+}
+
+function buildLineResponseSchema() {
+  return {
+    type: "ARRAY",
+    items: {
+      type: "OBJECT",
+      properties: {
+        text: { type: "STRING" },
+        x: { type: "NUMBER" },
+        y: { type: "NUMBER" },
+        width: { type: "NUMBER" },
+        height: { type: "NUMBER" }
+      },
+      required: ["text", "x", "y", "width", "height"]
+    }
+  };
 }
 
 function buildExtractionPrompt(sourceName, includeSummary, summaryWordLimit, ocrDetail) {
@@ -489,33 +520,7 @@ function buildExtractionPrompt(sourceName, includeSummary, summaryWordLimit, ocr
     "- markdown: the full transcription as Obsidian-friendly Markdown.",
   ];
 
-  if (ocrDetail === "searchable") {
-    lines.push(
-      "- pages: compact page-by-page OCR data for creating a searchable invisible PDF text layer.",
-      "",
-      "For each pages item:",
-      "- pageNumber: 1-based page number.",
-      "- text: all transcribed text for that page in reading order.",
-      "- Do not include line coordinates in searchable mode.",
-      ""
-    );
-  }
-
-  if (ocrDetail === "positioned") {
-    lines.push(
-      "- pages: page-by-page OCR data for creating an invisible PDF text layer.",
-      "",
-      "For each pages item:",
-      "- pageNumber: 1-based page number.",
-      "- text: all transcribed text for that page in reading order.",
-      "- lines: line-level OCR objects in reading order.",
-      "- Each line must include text plus x, y, width, and height as normalized decimals from 0 to 1.",
-      "- Use top-left page coordinates: x is distance from left edge, y is distance from top edge, width and height are the line box dimensions.",
-      "- Estimate coordinates from the visible handwriting layout as accurately as possible. Keep coordinates close to the handwritten line, not the hidden OCR layer.",
-      "- Keep line text compact; do not duplicate paragraphs in both line text and extra fields.",
-      ""
-    );
-  }
+  lines.push(...buildOcrDetailPromptLines(ocrDetail));
 
   lines.push(
     "Markdown requirements:",
@@ -531,6 +536,38 @@ function buildExtractionPrompt(sourceName, includeSummary, summaryWordLimit, ocr
   );
 
   return lines.join("\n");
+}
+
+function buildOcrDetailPromptLines(ocrDetail) {
+  if (ocrDetail === "none") return [];
+
+  const modeText = ocrDetail === "positioned"
+    ? "page-by-page OCR data for creating an invisible PDF text layer"
+    : "compact page-by-page OCR data for creating a searchable invisible PDF text layer";
+  const lines = [
+    `- pages: ${modeText}.`,
+    "",
+    "For each pages item:",
+    "- pageNumber: 1-based page number.",
+    "- text: all transcribed text for that page in reading order."
+  ];
+
+  if (ocrDetail === "searchable") {
+    lines.push("- Do not include line coordinates in searchable mode.");
+  }
+
+  if (ocrDetail === "positioned") {
+    lines.push(
+      "- lines: line-level OCR objects in reading order.",
+      "- Each line must include text plus x, y, width, and height as normalized decimals from 0 to 1.",
+      "- Use top-left page coordinates: x is distance from left edge, y is distance from top edge, width and height are the line box dimensions.",
+      "- Estimate coordinates from the visible handwriting layout as accurately as possible. Keep coordinates close to the handwritten line, not the hidden OCR layer.",
+      "- Keep line text compact; do not duplicate paragraphs in both line text and extra fields."
+    );
+  }
+
+  lines.push("");
+  return lines;
 }
 
 function parseGeminiResponse(json) {
@@ -604,17 +641,17 @@ async function createOcrOverlayPdf(sourcePdfData, result, mode) {
     const lines = mode === "positioned" ? getPositionedLines(ocrPage) : [];
 
     if (lines.length) {
-      drawPositionedInvisibleText(page, font, lines, width, height);
+      drawPositionedInvisibleText({ page, font, lines, pageWidth: width, pageHeight: height });
     } else {
       const text = ocrPage?.text || pageTextFallback[pageIndex] || result.markdown || "";
-      drawSearchableInvisibleText(page, font, text, width, height);
+      drawSearchableInvisibleText({ page, font, text, pageWidth: width, pageHeight: height });
     }
   }
 
   return pdfDoc.save({ useObjectStreams: false });
 }
 
-function drawPositionedInvisibleText(page, font, lines, pageWidth, pageHeight) {
+function drawPositionedInvisibleText({ page, font, lines, pageWidth, pageHeight }) {
   for (const line of lines) {
     const text = sanitizePdfText(line.text);
     if (!text) continue;
@@ -636,7 +673,7 @@ function drawPositionedInvisibleText(page, font, lines, pageWidth, pageHeight) {
   }
 }
 
-function drawSearchableInvisibleText(page, font, text, pageWidth, pageHeight) {
+function drawSearchableInvisibleText({ page, font, text, pageWidth, pageHeight }) {
   const lines = wrapTextForPdf(sanitizePdfText(text), 110);
   const size = 6;
   const lineHeight = size * 1.25;
@@ -848,3 +885,13 @@ function getErrorMessage(error) {
   if (error instanceof Error) return error.message;
   return String(error);
 }
+
+HandwritingPdfPlugin.__testing = {
+  buildExtractionPrompt,
+  buildResponseSchema,
+  getOcrDetailLevel,
+  hasExistingPdfTextLayer,
+  parseGeminiResponse
+};
+
+module.exports = HandwritingPdfPlugin;

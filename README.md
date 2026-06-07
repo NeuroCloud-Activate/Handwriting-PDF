@@ -2,7 +2,7 @@
 
 Handwriting PDF is an Obsidian plugin that turns handwritten PDF notes into formatted Markdown using Gemini document understanding.
 
-Current version: `0.1.8`.
+Current version: `0.1.9`.
 
 ## Features
 
@@ -74,7 +74,7 @@ This plugin bundles `pdf-lib` under the MIT license; see `PDF-LIB-LICENSE.md`.
 This repository is structured for Obsidian community plugin submission:
 
 - Root files include `README.md`, `LICENSE`, `manifest.json`, `versions.json`, `main.js`, and `styles.css`.
-- `manifest.json`, `package.json`, and `versions.json` all declare version `0.1.8`.
+- `manifest.json`, `package.json`, and `versions.json` all declare version `0.1.9`.
 - The plugin id is `handwriting-pdf`, which uses lowercase letters and hyphens and does not include `obsidian` or end with `plugin`.
 - `isDesktopOnly` is `false`; the plugin avoids Node.js and Electron runtime APIs so it can run on desktop and mobile Obsidian.
 - GitHub release tags must match the `manifest.json` version exactly.
