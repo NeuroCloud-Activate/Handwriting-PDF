@@ -22,7 +22,8 @@ const DEFAULT_SETTINGS = {
   alwaysRequestPositionedOcr: false,
   ocrTextLayerMode: "searchable",
   overwriteExisting: false,
-  includeFrontmatter: true
+  includeFrontmatter: true,
+  embedPdf: false
 };
 
 const GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models";
@@ -223,7 +224,8 @@ class HandwritingPdfPlugin extends Plugin {
       model: this.settings.model,
       embeddedPdfFile,
       includeSummary: this.settings.includeSummary,
-      includeFrontmatter: this.settings.includeFrontmatter
+      includeFrontmatter: this.settings.includeFrontmatter,
+      embedPdf: this.settings.embedPdf
     });
 
     if (folder) await ensureFolder(this.app, folder);
@@ -339,7 +341,7 @@ class HandwritingPdfSettingTab extends PluginSettingTab {
       {
         key: "createOcrPdf",
         name: "Create OCR-enhanced PDF",
-        description: "When enabled, creates a copy of the PDF with an invisible Gemini text layer and embeds that copy in the generated note."
+        description: "When enabled, creates a copy of the PDF with an invisible Gemini text layer and uses that copy in the generated note."
       },
       {
         key: "autoDetectTextLayer",
@@ -358,8 +360,13 @@ class HandwritingPdfSettingTab extends PluginSettingTab {
     addBoundToggleSettings(containerEl, this.plugin, [
       {
         key: "includeFrontmatter",
-        name: "Include frontmatter",
-        description: "Add source PDF and model metadata to generated notes."
+        name: "Include note details",
+        description: "Add source PDF and model details below the note title."
+      },
+      {
+        key: "embedPdf",
+        name: "Embed PDF in note",
+        description: "Disabled by default. When off, the note links to the PDF instead of embedding it."
       },
       {
         key: "overwriteExisting",
@@ -598,31 +605,30 @@ function parseGeminiResponse(json) {
   }
 }
 
-function buildMarkdownNote({ pdfFile, embeddedPdfFile, noteTitle, result, model, includeSummary, includeFrontmatter }) {
+function buildMarkdownNote({ pdfFile, embeddedPdfFile, noteTitle, result, model, includeSummary, includeFrontmatter, embedPdf }) {
   const sections = [];
   const sourceLink = `[[${pdfFile.path}]]`;
   const embeddedLink = `[[${embeddedPdfFile.path}]]`;
-  const embedLink = `![[${embeddedPdfFile.path}]]`;
+  const pdfReference = embedPdf ? `![[${embeddedPdfFile.path}]]` : embeddedLink;
+
+  sections.push(`# ${noteTitle}`);
 
   if (includeFrontmatter) {
     sections.push([
-      "---",
-      `source_pdf: "${escapeYaml(sourceLink)}"`,
-      `embedded_pdf: "${escapeYaml(embeddedLink)}"`,
-      `ocr_model: "${escapeYaml(model)}"`,
-      `created: "${window.moment().format("YYYY-MM-DDTHH:mm:ssZ")}"`,
-      "---"
+      "## Details",
+      `- Source PDF: ${sourceLink}`,
+      `- Linked PDF: ${embeddedLink}`,
+      `- OCR model: \`${model}\``,
+      `- Created: ${window.moment().format("YYYY-MM-DDTHH:mm:ssZ")}`
     ].join("\n"));
   }
-
-  sections.push(`# ${noteTitle}`);
 
   if (includeSummary && result.summary) {
     sections.push(["## Summary", result.summary].join("\n\n"));
   }
 
   sections.push(["## Transcription", result.markdown || "_No transcription returned._"].join("\n\n"));
-  sections.push(["## Source PDF", embedLink].join("\n\n"));
+  sections.push(["## Source PDF", pdfReference].join("\n\n"));
 
   return `${sections.join("\n\n")}\n`;
 }
@@ -845,10 +851,6 @@ function stripJsonFence(value) {
 function repairCommonJsonIssues(value) {
   return String(value || "")
     .replace(/\{\s*"([^"]+)"\s*,\s*"x"\s*:/g, '{ "text": "$1", "x":');
-}
-
-function escapeYaml(value) {
-  return String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
 function arrayBufferToBase64(buffer) {
