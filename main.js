@@ -11,6 +11,24 @@ const {
 
 const { PDFDocument, StandardFonts, rgb } = getPdfLib();
 
+const COMPATIBLE_MODELS = [
+  {
+    id: "gemini-3.1-flash-lite",
+    name: "Gemini 3.1 Flash-Lite",
+    description: "Fastest default for PDF handwriting notes."
+  },
+  {
+    id: "gemini-2.5-pro",
+    name: "Gemini 2.5 Pro",
+    description: "Higher quality for harder handwriting, slower."
+  },
+  {
+    id: "gemini-3-pro-preview",
+    name: "Gemini 3 Pro Preview",
+    description: "Advanced multimodal reasoning, slowest option."
+  }
+];
+
 const DEFAULT_SETTINGS = {
   apiKey: "",
   model: "gemini-3.1-flash-lite",
@@ -25,6 +43,50 @@ const DEFAULT_SETTINGS = {
   includeFrontmatter: true,
   embedPdf: false
 };
+
+const SUMMARY_TOGGLE_SETTINGS = [
+  {
+    key: "includeSummary",
+    name: "Add summary",
+    description: "Add a concise summary before the transcription."
+  }
+];
+
+const OCR_TOGGLE_SETTINGS = [
+  {
+    key: "createOcrPdf",
+    name: "Create OCR-enhanced PDF",
+    description: "When enabled, creates a copy of the PDF with an invisible Gemini text layer and uses that copy in the generated note."
+  },
+  {
+    key: "autoDetectTextLayer",
+    name: "Auto-detect existing PDF text layer",
+    description: "When enabled, image-only PDFs request positioned line data, while PDFs that already have a text layer use faster page text. When disabled, OCR-enhanced PDFs use faster page text unless positioned layout is forced."
+  },
+  {
+    key: "alwaysRequestPositionedOcr",
+    name: "Always request positioned OCR layout",
+    description: "Disabled by default. When enabled, Gemini returns page text and line coordinates for every PDF, even when an existing text layer is detected."
+  }
+];
+
+const NOTE_TOGGLE_SETTINGS = [
+  {
+    key: "includeFrontmatter",
+    name: "Include note details",
+    description: "Add source PDF and model details below the note title."
+  },
+  {
+    key: "embedPdf",
+    name: "Embed PDF in note",
+    description: "Disabled by default. When off, the note links to the PDF instead of embedding it."
+  },
+  {
+    key: "overwriteExisting",
+    name: "Overwrite existing note names",
+    description: "When disabled, duplicate names receive a numeric suffix."
+  }
+];
 
 const GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models";
 
@@ -89,27 +151,43 @@ class HandwritingPdfPlugin extends Plugin {
       return;
     }
 
+    const timings = createTimingTracker();
     const notice = new Notice("Handwriting PDF: reading PDF...", 0);
 
     try {
       const pdfData = await this.app.vault.readBinary(pdfFile);
+      timings.mark("readPdf");
+
       const base64Pdf = arrayBufferToBase64(pdfData);
+      timings.mark("encodePdf");
+
       const hasTextOverlay = hasExistingPdfTextLayer(pdfData);
+      timings.mark("detectTextLayer");
 
       notice.setMessage("Handwriting PDF: asking Gemini to read handwriting...");
       const result = await this.extractHandwriting(base64Pdf, pdfFile, hasTextOverlay);
+      timings.mark("geminiRequest");
 
       let embeddedPdfFile = pdfFile;
       if (this.settings.createOcrPdf) {
         notice.setMessage("Handwriting PDF: creating OCR text layer...");
         embeddedPdfFile = await this.writeOcrPdf(pdfFile, pdfData, result, result.ocrDetail);
+        timings.mark("writeOcrPdf");
       }
 
       notice.setMessage("Handwriting PDF: creating Markdown note...");
       const notePath = await this.writeMarkdownNote(pdfFile, embeddedPdfFile, result);
+      timings.mark("writeMarkdown");
 
       notice.hide();
       new Notice(`Handwriting PDF: created ${notePath}`);
+      logTimingSummary({
+        timings,
+        model: this.settings.model,
+        ocrDetail: result.ocrDetail,
+        hasTextOverlay,
+        createOcrPdf: this.settings.createOcrPdf
+      });
 
       const noteFile = this.app.vault.getAbstractFileByPath(notePath);
       if (noteFile instanceof TFile) {
@@ -146,9 +224,7 @@ class HandwritingPdfPlugin extends Plugin {
         ],
         generationConfig: {
           temperature: 0.1,
-          thinkingConfig: {
-            thinkingBudget: 0
-          },
+          thinkingConfig: buildThinkingConfig(this.settings.model),
           responseMimeType: "application/json",
           responseSchema: buildResponseSchema(ocrDetail)
         }
@@ -288,13 +364,13 @@ class HandwritingPdfSettingTab extends PluginSettingTab {
       }
     });
 
-    addTextSetting(containerEl, {
+    addDropdownSetting(containerEl, {
       name: "Gemini model",
-      description: "Use a Gemini model that accepts PDF input and returns text.",
-      placeholder: "gemini-3.1-flash-lite",
+      description: "Choose a Gemini model that supports PDF input and handwriting recognition.",
+      options: getModelOptions(this.plugin.settings.model),
       value: this.plugin.settings.model,
       onChange: async (value) => {
-        this.plugin.settings.model = value.trim() || DEFAULT_SETTINGS.model;
+        this.plugin.settings.model = value || DEFAULT_SETTINGS.model;
         await this.plugin.saveSettings();
       }
     });
@@ -315,13 +391,7 @@ class HandwritingPdfSettingTab extends PluginSettingTab {
   }
 
   renderSummarySettings(containerEl) {
-    addBoundToggleSettings(containerEl, this.plugin, [
-      {
-        key: "includeSummary",
-        name: "Add summary",
-        description: "Add a concise summary before the transcription."
-      }
-    ]);
+    addBoundToggleSettings(containerEl, this.plugin, SUMMARY_TOGGLE_SETTINGS);
 
     addTextSetting(containerEl, {
       name: "Summary word limit",
@@ -337,43 +407,11 @@ class HandwritingPdfSettingTab extends PluginSettingTab {
   }
 
   renderOcrSettings(containerEl) {
-    addBoundToggleSettings(containerEl, this.plugin, [
-      {
-        key: "createOcrPdf",
-        name: "Create OCR-enhanced PDF",
-        description: "When enabled, creates a copy of the PDF with an invisible Gemini text layer and uses that copy in the generated note."
-      },
-      {
-        key: "autoDetectTextLayer",
-        name: "Auto-detect existing PDF text layer",
-        description: "When enabled, image-only PDFs request positioned line data, while PDFs that already have a text layer use faster page text. When disabled, OCR-enhanced PDFs use faster page text unless positioned layout is forced."
-      },
-      {
-        key: "alwaysRequestPositionedOcr",
-        name: "Always request positioned OCR layout",
-        description: "Disabled by default. When enabled, Gemini returns page text and line coordinates for every PDF, even when an existing text layer is detected."
-      }
-    ]);
+    addBoundToggleSettings(containerEl, this.plugin, OCR_TOGGLE_SETTINGS);
   }
 
   renderNoteSettings(containerEl) {
-    addBoundToggleSettings(containerEl, this.plugin, [
-      {
-        key: "includeFrontmatter",
-        name: "Include note details",
-        description: "Add source PDF and model details below the note title."
-      },
-      {
-        key: "embedPdf",
-        name: "Embed PDF in note",
-        description: "Disabled by default. When off, the note links to the PDF instead of embedding it."
-      },
-      {
-        key: "overwriteExisting",
-        name: "Overwrite existing note names",
-        description: "When disabled, duplicate names receive a numeric suffix."
-      }
-    ]);
+    addBoundToggleSettings(containerEl, this.plugin, NOTE_TOGGLE_SETTINGS);
   }
 }
 
@@ -397,6 +435,20 @@ function addToggleSetting(containerEl, { name, description, value, onChange }) {
     .addToggle((toggle) => toggle.setValue(value).onChange(onChange));
 }
 
+function addDropdownSetting(containerEl, { name, description, options, value, onChange }) {
+  new Setting(containerEl)
+    .setName(name)
+    .setDesc(description)
+    .addDropdown((dropdown) => {
+      for (const option of options) {
+        dropdown.addOption(option.id, `${option.name} - ${option.description}`);
+      }
+      dropdown
+        .setValue(value)
+        .onChange(onChange);
+    });
+}
+
 function addBoundToggleSettings(containerEl, plugin, settings) {
   for (const setting of settings) {
     addToggleSetting(containerEl, {
@@ -409,6 +461,21 @@ function addBoundToggleSettings(containerEl, plugin, settings) {
       }
     });
   }
+}
+
+function getModelOptions(currentModel) {
+  if (!currentModel || COMPATIBLE_MODELS.some((model) => model.id === currentModel)) {
+    return COMPATIBLE_MODELS;
+  }
+
+  return [
+    {
+      id: currentModel,
+      name: `${currentModel} (saved)`,
+      description: "Previously saved model ID."
+    },
+    ...COMPATIBLE_MODELS
+  ];
 }
 
 async function requestGeminiWithRetry({ url, body }) {
@@ -441,6 +508,25 @@ function getOcrDetailLevel(settings, hasTextOverlay) {
   if (settings.autoDetectTextLayer && hasTextOverlay) return "searchable";
   if (settings.autoDetectTextLayer && !hasTextOverlay) return "positioned";
   return "searchable";
+}
+
+function buildThinkingConfig(model) {
+  if (isGemini3Flash(model)) return { thinkingLevel: "minimal" };
+  if (isGemini3Model(model)) return { thinkingLevel: "low" };
+  if (isGemini25ThinkingModel(model)) return { thinkingBudget: 0 };
+  return {};
+}
+
+function isGemini3Flash(model) {
+  return /^gemini-3(?:[\w.-]*flash|.*flash)/i.test(String(model || ""));
+}
+
+function isGemini3Model(model) {
+  return /^gemini-3/i.test(String(model || ""));
+}
+
+function isGemini25ThinkingModel(model) {
+  return /^gemini-2\.5/i.test(String(model || ""));
 }
 
 function hasExistingPdfTextLayer(pdfData) {
@@ -883,14 +969,57 @@ function uint8ArrayToArrayBuffer(bytes) {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 }
 
+function createTimingTracker() {
+  const startedAt = nowMs();
+  let lastMark = startedAt;
+  const stages = [];
+
+  return {
+    mark(stage) {
+      const current = nowMs();
+      stages.push({
+        stage,
+        ms: Math.round(current - lastMark),
+        totalMs: Math.round(current - startedAt)
+      });
+      lastMark = current;
+    },
+    summary() {
+      return {
+        totalMs: Math.round(nowMs() - startedAt),
+        stages
+      };
+    }
+  };
+}
+
+function logTimingSummary({ timings, model, ocrDetail, hasTextOverlay, createOcrPdf }) {
+  const summary = timings.summary();
+  console.info("Handwriting PDF timing", {
+    totalMs: summary.totalMs,
+    model,
+    ocrDetail,
+    hasTextOverlay,
+    createOcrPdf,
+    stages: summary.stages
+  });
+}
+
+function nowMs() {
+  if (typeof performance !== "undefined" && performance.now) return performance.now();
+  return Date.now();
+}
+
 function getErrorMessage(error) {
   if (error instanceof Error) return error.message;
   return String(error);
 }
 
 HandwritingPdfPlugin.__testing = {
+  buildThinkingConfig,
   buildExtractionPrompt,
   buildResponseSchema,
+  getModelOptions,
   getOcrDetailLevel,
   hasExistingPdfTextLayer,
   parseGeminiResponse
