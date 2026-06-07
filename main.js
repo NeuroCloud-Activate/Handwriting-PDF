@@ -618,6 +618,10 @@ function buildExtractionPrompt(sourceName, includeSummary, summaryWordLimit, ocr
   lines.push(
     "Markdown requirements:",
     "- Preserve inferred headings, bullets, numbering, indentation, emphasis, and tables.",
+    "- Convert handwritten grid tables, comparison charts, lab values, schedules, and column-style note blocks into GitHub-flavored Markdown tables when the row and column structure is clear.",
+    "- Keep table cell text concise and faithful to the handwriting. Do not invent missing cells; use [unclear] for uncertain content and leave truly blank cells empty.",
+    "- Add a Markdown table separator row after each table header so tables render correctly in Obsidian.",
+    "- If a table-like region is too ambiguous to align accurately, use compact bullets instead of forcing a table.",
     "- Preserve the original reading order. When a page boundary is meaningful, add a subtle `### Page N` heading.",
     "- Correct obvious spelling, grammar, capitalization, and punctuation errors so the transcription is readable and understandable.",
     "- Preserve the original meaning. Do not rewrite ideas, summarize the transcription, or add content that is not present in the note.",
@@ -677,7 +681,7 @@ function parseGeminiResponse(json) {
       title: String(parsed.title || "").trim(),
       date: String(parsed.date || "").trim(),
       summary: String(parsed.summary || "").trim(),
-      markdown: String(parsed.markdown || "").trim(),
+      markdown: normalizeMarkdownTables(String(parsed.markdown || "").trim()),
       pages: normalizeOcrPages(parsed.pages)
     };
   } catch (error) {
@@ -685,7 +689,7 @@ function parseGeminiResponse(json) {
       title: "",
       date: "",
       summary: "",
-      markdown: stripJsonFence(text),
+      markdown: normalizeMarkdownTables(stripJsonFence(text)),
       pages: []
     };
   }
@@ -717,6 +721,76 @@ function buildMarkdownNote({ pdfFile, embeddedPdfFile, noteTitle, result, model,
   sections.push(["## Source PDF", pdfReference].join("\n\n"));
 
   return `${sections.join("\n\n")}\n`;
+}
+
+function normalizeMarkdownTables(markdown) {
+  const lines = String(markdown || "").split("\n");
+  const output = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    if (!isTableRow(lines[index])) {
+      output.push(lines[index]);
+      index += 1;
+      continue;
+    }
+
+    const tableLines = [];
+    while (index < lines.length && isTableRow(lines[index])) {
+      tableLines.push(lines[index]);
+      index += 1;
+    }
+    output.push(...normalizeTableBlock(tableLines));
+  }
+
+  return output.join("\n").trim();
+}
+
+function normalizeTableBlock(lines) {
+  if (lines.length < 2) return lines;
+
+  const rows = lines.map(parseTableRow);
+  const columnCount = Math.max(...rows.map((row) => row.length));
+  if (columnCount < 2) return lines;
+
+  const normalized = rows.map((row) => formatTableRow(padTableRow(row, columnCount)));
+  if (!isTableSeparatorRow(rows[1])) {
+    normalized.splice(1, 0, formatTableSeparator(columnCount));
+  }
+
+  return normalized;
+}
+
+function isTableRow(line) {
+  const trimmed = String(line || "").trim();
+  return trimmed.startsWith("|") && trimmed.endsWith("|") && countMatches(trimmed, /\|/g) >= 3;
+}
+
+function parseTableRow(line) {
+  return String(line || "")
+    .trim()
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((cell) => cell.trim());
+}
+
+function padTableRow(row, columnCount) {
+  const padded = row.slice(0, columnCount);
+  while (padded.length < columnCount) padded.push("");
+  return padded;
+}
+
+function formatTableRow(row) {
+  return `| ${row.join(" | ")} |`;
+}
+
+function formatTableSeparator(columnCount) {
+  return formatTableRow(Array.from({ length: columnCount }, () => "---"));
+}
+
+function isTableSeparatorRow(row) {
+  return row.length > 0 && row.every((cell) => /^:?-{3,}:?$/.test(cell.trim()));
 }
 
 async function createOcrOverlayPdf(sourcePdfData, result, mode) {
@@ -1022,6 +1096,7 @@ HandwritingPdfPlugin.__testing = {
   getModelOptions,
   getOcrDetailLevel,
   hasExistingPdfTextLayer,
+  normalizeMarkdownTables,
   parseGeminiResponse
 };
 

@@ -9,6 +9,7 @@ const versions = readJson("versions.json");
 
 const requiredFiles = [
   "README.md",
+  "CHANGELOG.md",
   "LICENSE",
   "PDF-LIB-LICENSE.md",
   "manifest.json",
