@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.14
+
+- Reinforced the AI-mediated cleanup path so generated Markdown remains readable, structured, and polished.
+- Clarified that grammar, punctuation, headings, bullets, and emphasis cleanup must stay faithful to the handwritten note.
+- Kept the local formatting preflight focused on limiting extra table/list/math effort, not disabling normal transcription cleanup.
+
 ## 0.1.13
 
 - Added a cheap local PDF structure preflight for table, list, math, and ink hints.

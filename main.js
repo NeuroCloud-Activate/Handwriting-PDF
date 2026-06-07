@@ -649,6 +649,9 @@ function buildExtractionPrompt({
   const lines = [
     "You are transcribing a handwritten note PDF for an Obsidian vault.",
     "Read the handwriting from the visible PDF pages. The visual page content is the source of truth.",
+    "Primary goal: produce a faithful transcription that is immediately usable as a clear Markdown note.",
+    "You may lightly clean spelling, grammar, capitalization, and punctuation, and apply Markdown structure such as headings, bold emphasis, bullets, numbering, and paragraph breaks when the visible note supports it.",
+    "Do not change the note's content, conclusions, intent, clinical/scientific meaning, numbers, names, dates, measurements, or relationships between ideas.",
     "If an invisible OCR text layer is present, treat it only as a weak hint for ambiguous characters. Do not let hidden OCR text shorten, summarize, reorder, or replace the visible handwriting transcription.",
     "Make a complete page-by-page pass from the first page through the last page. Include all legible headings, bullets, labels, marginal notes, and short fragments. Do not compress repeated list items or skip low-confidence but legible content.",
     "Return strict JSON only. Do not wrap the JSON in Markdown.",
@@ -665,11 +668,13 @@ function buildExtractionPrompt({
 
   lines.push(
     "Markdown requirements:",
-    "- Preserve clear headings, indentation, and emphasis when they are visible.",
+    "- Always return readable, well-structured Markdown rather than a raw OCR dump.",
+    "- Preserve clear headings, indentation, bullets, numbering, checkboxes, paragraph grouping, and emphasis when they are visible or strongly implied by the handwritten layout.",
+    "- Use Markdown headings and bold text to reflect visible note hierarchy and emphasized terms, but do not add emphasis for new interpretation or editorial tone.",
     "- Preserve the original reading order. When a page boundary is meaningful, add a subtle `### Page N` heading.",
-    "- Correct obvious spelling, grammar, capitalization, and punctuation errors so the transcription is readable and understandable.",
-    "- Preserve the original meaning. Do not rewrite ideas, summarize the transcription, or add content that is not present in the note.",
-    "- Use the local formatting preflight rules above for tables, lists, and math so extra formatting effort is only used when detected or clearly visible.",
+    "- Correct obvious spelling, grammar, capitalization, and punctuation errors only when the correction is clear from context and improves readability.",
+    "- Preserve the original meaning. Do not rewrite ideas, summarize the transcription, normalize specialized wording, or add content that is not present in the note.",
+    "- Use the local formatting preflight rules above for extra table, list, and math handling so higher-effort structure work is only used when detected or clearly visible.",
     "- Keep uncertain words in [unclear] brackets instead of inventing content.",
     "- Do not include a duplicate title heading, summary heading, source PDF embed, or YAML frontmatter in markdown.",
     "",
@@ -703,7 +708,7 @@ function buildStructureHintPromptLines(structureHints) {
   if (hints.likelyLists) {
     lines.push("- List formatting: preserve visible bullets, numbering, checkboxes, and indentation as Markdown lists.");
   } else {
-    lines.push("- List formatting: do not turn ordinary line breaks into bullets unless bullet marks, numbering, checkboxes, or indentation are visible.");
+    lines.push("- List formatting: do not do extra list reconstruction beyond obvious visible bullets, numbering, checkboxes, or indentation.");
   }
 
   if (hints.likelyMath) {
