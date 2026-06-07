@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.13
+
+- Added a cheap local PDF structure preflight for table, list, math, and ink hints.
+- Updated the Gemini prompt so tables, lists, and math receive extra formatting effort only when local hints or clearly visible page layout justify it.
+- Kept the workflow single-pass with no extra Gemini calls or expanded response schema.
+
 ## 0.1.12
 
 - Improved handwritten table handling by prompting Gemini to use GitHub-flavored Markdown tables when table structure is clear.

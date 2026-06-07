@@ -161,11 +161,12 @@ class HandwritingPdfPlugin extends Plugin {
       const base64Pdf = arrayBufferToBase64(pdfData);
       timings.mark("encodePdf");
 
-      const hasTextOverlay = hasExistingPdfTextLayer(pdfData);
-      timings.mark("detectTextLayer");
+      const pdfSignals = analyzePdfSignals(pdfData);
+      const hasTextOverlay = pdfSignals.hasTextOverlay;
+      timings.mark("analyzePdfStructure");
 
       notice.setMessage("Handwriting PDF: asking Gemini to read handwriting...");
-      const result = await this.extractHandwriting(base64Pdf, pdfFile, hasTextOverlay);
+      const result = await this.extractHandwriting(base64Pdf, pdfFile, hasTextOverlay, pdfSignals.structureHints);
       timings.mark("geminiRequest");
 
       let embeddedPdfFile = pdfFile;
@@ -186,6 +187,7 @@ class HandwritingPdfPlugin extends Plugin {
         model: this.settings.model,
         ocrDetail: result.ocrDetail,
         hasTextOverlay,
+        structureHints: pdfSignals.structureHints,
         createOcrPdf: this.settings.createOcrPdf
       });
 
@@ -200,9 +202,15 @@ class HandwritingPdfPlugin extends Plugin {
     }
   }
 
-  async extractHandwriting(base64Pdf, pdfFile, hasTextOverlay) {
+  async extractHandwriting(base64Pdf, pdfFile, hasTextOverlay, structureHints) {
     const ocrDetail = getOcrDetailLevel(this.settings, hasTextOverlay);
-    const prompt = buildExtractionPrompt(pdfFile.basename, this.settings.includeSummary, this.settings.summaryWordLimit, ocrDetail);
+    const prompt = buildExtractionPrompt({
+      sourceName: pdfFile.basename,
+      includeSummary: this.settings.includeSummary,
+      summaryWordLimit: this.settings.summaryWordLimit,
+      ocrDetail,
+      structureHints
+    });
     const url = `${GEMINI_ENDPOINT}/${encodeURIComponent(this.settings.model)}:generateContent?key=${encodeURIComponent(this.settings.apiKey.trim())}`;
 
     const response = await requestGeminiWithRetry({
@@ -530,13 +538,46 @@ function isGemini25ThinkingModel(model) {
 }
 
 function hasExistingPdfTextLayer(pdfData) {
+  return analyzePdfSignals(pdfData).hasTextOverlay;
+}
+
+function analyzePdfSignals(pdfData) {
   const content = bytesToLatin1(pdfData);
   const textOperators = countMatches(content, /\bTj\b|\bTJ\b/g);
   const fontRefs = countMatches(content, /\/Font\b/g);
   const unicodeMaps = countMatches(content, /\/ToUnicode\b/g);
+  const hasTextOverlay = (unicodeMaps > 0 && textOperators > 0) || (fontRefs > 0 && textOperators >= 20);
 
-  if (unicodeMaps > 0 && textOperators > 0) return true;
-  return fontRefs > 0 && textOperators >= 20;
+  return {
+    hasTextOverlay,
+    structureHints: {
+      likelyTables: hasLikelyTableSignals(content),
+      likelyLists: hasLikelyListSignals(content),
+      likelyMath: hasLikelyMathSignals(content),
+      likelyInk: hasLikelyInkSignals(content)
+    }
+  };
+}
+
+function hasLikelyTableSignals(content) {
+  const pipeRows = countMatches(content, /\|[^|\r\n]+\|[^|\r\n]+\|/g);
+  const tableWords = countMatches(content, /\b(table|column|row|grid|schedule|matrix)\b/gi);
+  const vectorLineSignals = countMatches(content, /\/Subtype\s*\/Line\b|\/L\s*\[/g);
+  return pipeRows >= 2 || tableWords >= 2 || vectorLineSignals >= 4;
+}
+
+function hasLikelyListSignals(content) {
+  const bulletSignals = countMatches(content, /[•·]|(?:^|[\r\n])\s*[-*+]\s+/g);
+  const numberedSignals = countMatches(content, /(?:^|[\r\n])\s*\d+[.)]\s+/g);
+  return bulletSignals + numberedSignals >= 2;
+}
+
+function hasLikelyMathSignals(content) {
+  return countMatches(content, /[=<>±×÷≤≥∑√∞µ]|\\(?:alpha|beta|sum|frac|sqrt)\b/g) >= 2;
+}
+
+function hasLikelyInkSignals(content) {
+  return countMatches(content, /\/Subtype\s*\/Ink\b|\/InkList\b|\/Annots\b/g) > 0;
 }
 
 function buildResponseSchema(ocrDetail) {
@@ -598,7 +639,13 @@ function buildLineResponseSchema() {
   };
 }
 
-function buildExtractionPrompt(sourceName, includeSummary, summaryWordLimit, ocrDetail) {
+function buildExtractionPrompt({
+  sourceName,
+  includeSummary,
+  summaryWordLimit,
+  ocrDetail,
+  structureHints = {}
+}) {
   const lines = [
     "You are transcribing a handwritten note PDF for an Obsidian vault.",
     "Read the handwriting from the visible PDF pages. The visual page content is the source of truth.",
@@ -614,18 +661,15 @@ function buildExtractionPrompt(sourceName, includeSummary, summaryWordLimit, ocr
   ];
 
   lines.push(...buildOcrDetailPromptLines(ocrDetail));
+  lines.push(...buildStructureHintPromptLines(structureHints));
 
   lines.push(
     "Markdown requirements:",
-    "- Preserve inferred headings, bullets, numbering, indentation, emphasis, and tables.",
-    "- Convert handwritten grid tables, comparison charts, lab values, schedules, and column-style note blocks into GitHub-flavored Markdown tables when the row and column structure is clear.",
-    "- Keep table cell text concise and faithful to the handwriting. Do not invent missing cells; use [unclear] for uncertain content and leave truly blank cells empty.",
-    "- Add a Markdown table separator row after each table header so tables render correctly in Obsidian.",
-    "- If a table-like region is too ambiguous to align accurately, use compact bullets instead of forcing a table.",
+    "- Preserve clear headings, indentation, and emphasis when they are visible.",
     "- Preserve the original reading order. When a page boundary is meaningful, add a subtle `### Page N` heading.",
     "- Correct obvious spelling, grammar, capitalization, and punctuation errors so the transcription is readable and understandable.",
     "- Preserve the original meaning. Do not rewrite ideas, summarize the transcription, or add content that is not present in the note.",
-    "- Convert mathematical notation and formulas to LaTeX using $...$ or $$...$$.",
+    "- Use the local formatting preflight rules above for tables, lists, and math so extra formatting effort is only used when detected or clearly visible.",
     "- Keep uncertain words in [unclear] brackets instead of inventing content.",
     "- Do not include a duplicate title heading, summary heading, source PDF embed, or YAML frontmatter in markdown.",
     "",
@@ -633,6 +677,52 @@ function buildExtractionPrompt(sourceName, includeSummary, summaryWordLimit, ocr
   );
 
   return lines.join("\n");
+}
+
+function buildStructureHintPromptLines(structureHints) {
+  const hints = normalizeStructureHints(structureHints);
+  const lines = [
+    "Local formatting preflight:",
+    `- likely handwritten or embedded ink: ${hints.likelyInk ? "yes" : "no"}.`,
+    `- likely table/grid structure: ${hints.likelyTables ? "yes" : "no"}.`,
+    `- likely bullet or numbered list structure: ${hints.likelyLists ? "yes" : "no"}.`,
+    `- likely math/formula structure: ${hints.likelyMath ? "yes" : "no"}.`,
+    "- These local hints are cheap and may miss handwritten structures. The visible PDF pages remain the source of truth.",
+    ""
+  ];
+
+  if (hints.likelyTables) {
+    lines.push(
+      "- Table formatting: convert clear handwritten grid tables, comparison charts, lab values, schedules, and column-style note blocks into GitHub-flavored Markdown tables.",
+      "- For tables, keep cells concise and faithful; do not invent missing cells, use [unclear] for uncertain content, leave truly blank cells empty, and include the Markdown separator row."
+    );
+  } else {
+    lines.push("- Table formatting: do not spend extra effort creating Markdown tables unless the visible page layout clearly contains an aligned table or grid.");
+  }
+
+  if (hints.likelyLists) {
+    lines.push("- List formatting: preserve visible bullets, numbering, checkboxes, and indentation as Markdown lists.");
+  } else {
+    lines.push("- List formatting: do not turn ordinary line breaks into bullets unless bullet marks, numbering, checkboxes, or indentation are visible.");
+  }
+
+  if (hints.likelyMath) {
+    lines.push("- Math formatting: convert visible formulas and mathematical notation to LaTeX using $...$ or $$...$$.");
+  } else {
+    lines.push("- Math formatting: do not create LaTeX unless visible mathematical notation or formulas are present.");
+  }
+
+  lines.push("");
+  return lines;
+}
+
+function normalizeStructureHints(value) {
+  return {
+    likelyTables: value?.likelyTables === true,
+    likelyLists: value?.likelyLists === true,
+    likelyMath: value?.likelyMath === true,
+    likelyInk: value?.likelyInk === true
+  };
 }
 
 function buildOcrDetailPromptLines(ocrDetail) {
@@ -1067,13 +1157,14 @@ function createTimingTracker() {
   };
 }
 
-function logTimingSummary({ timings, model, ocrDetail, hasTextOverlay, createOcrPdf }) {
+function logTimingSummary({ timings, model, ocrDetail, hasTextOverlay, structureHints, createOcrPdf }) {
   const summary = timings.summary();
   console.info("Handwriting PDF timing", {
     totalMs: summary.totalMs,
     model,
     ocrDetail,
     hasTextOverlay,
+    structureHints: normalizeStructureHints(structureHints),
     createOcrPdf,
     stages: summary.stages
   });
@@ -1090,6 +1181,7 @@ function getErrorMessage(error) {
 }
 
 HandwritingPdfPlugin.__testing = {
+  analyzePdfSignals,
   buildThinkingConfig,
   buildExtractionPrompt,
   buildResponseSchema,
