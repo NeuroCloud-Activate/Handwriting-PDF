@@ -1,0 +1,36 @@
+.handwriting-pdf-status {
+  color: var(--text-muted);
+}
+
+.handwriting-pdf-settings {
+  padding-bottom: max(2rem, env(safe-area-inset-bottom));
+}
+
+.handwriting-pdf-settings .setting-item {
+  align-items: flex-start;
+  gap: 0.75rem;
+}
+
+.handwriting-pdf-settings .setting-item-control {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  min-width: min(100%, 16rem);
+}
+
+.handwriting-pdf-settings input[type="text"],
+.handwriting-pdf-settings input[type="password"] {
+  max-width: 100%;
+  width: min(32rem, 100%);
+}
+
+@media (max-width: 640px) {
+  .handwriting-pdf-settings .setting-item {
+    display: block;
+  }
+
+  .handwriting-pdf-settings .setting-item-control {
+    justify-content: flex-start;
+    margin-top: 0.5rem;
+    width: 100%;
+  }
+}

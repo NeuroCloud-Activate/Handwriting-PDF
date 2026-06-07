@@ -1,0 +1,38 @@
+name: Checks
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Validate plugin release metadata
+        run: node scripts/validate-release.mjs
+
+      - name: Syntax check plugin and scripts
+        run: |
+          node --check main.js
+          node --check scripts/build-release.mjs
+          node --check scripts/validate-release.mjs
+
+      - name: Build release assets
+        run: node scripts/build-release.mjs
+
+      - name: Verify release assets
+        run: |
+          test -s dist/main.js
+          test -s dist/manifest.json
+          test -s dist/styles.css
+          node --check dist/main.js

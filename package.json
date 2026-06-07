@@ -1,0 +1,19 @@
+{
+  "name": "handwriting-pdf",
+  "version": "0.1.8",
+  "description": "Obsidian plugin for turning handwritten PDF notes into formatted Markdown using Gemini.",
+  "main": "main.js",
+  "scripts": {
+    "build:release": "node scripts/build-release.mjs",
+    "check": "node --check main.js && node --check scripts/build-release.mjs && node --check scripts/validate-release.mjs && node scripts/validate-release.mjs && node scripts/build-release.mjs && node --check dist/main.js"
+  },
+  "keywords": [
+    "obsidian",
+    "pdf",
+    "ocr",
+    "handwriting",
+    "gemini"
+  ],
+  "license": "GPL-3.0-only",
+  "devDependencies": {}
+}
