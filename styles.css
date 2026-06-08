@@ -23,6 +23,12 @@
   width: min(32rem, 100%);
 }
 
+.handwriting-pdf-settings textarea.handwriting-pdf-textarea {
+  max-width: 100%;
+  min-height: 6rem;
+  width: min(32rem, 100%);
+}
+
 @media (max-width: 640px) {
   .handwriting-pdf-settings .setting-item {
     display: block;

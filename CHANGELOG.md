@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.16
+
+- Added default-on customizable summary guidance for tone, focus, action-item context, major themes, and highlights.
+- Added configurable action-item tagging with `#Todo` as the default tag.
+- Strengthened transcription formatting instructions for sentence periods, readable Markdown structure, bold/italic emphasis, and duplicate-heading avoidance.
+- Updated generated note details to show the `YYYY-MM-DD - Note Title` format and link the source PDF at both the beginning and end when not embedded.
+
 ## 0.1.15
 
 - Improved plugin launch reliability by deferring output-folder creation until Obsidian layout readiness.

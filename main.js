@@ -33,6 +33,10 @@ const DEFAULT_SETTINGS = {
   outputFolder: "Handwriting PDF Notes",
   includeSummary: true,
   summaryWordLimit: 200,
+  summaryPromptEnabled: true,
+  summaryPrompt: "Write a short, useful summary that stays faithful to the note. Focus on major themes, key highlights, useful context, and any clear action items without adding new interpretation.",
+  actionItemTagging: true,
+  actionItemTag: "#Todo",
   createOcrPdf: false,
   autoDetectTextLayer: true,
   alwaysRequestPositionedOcr: false,
@@ -47,6 +51,19 @@ const SUMMARY_TOGGLE_SETTINGS = [
     key: "includeSummary",
     name: "Add summary",
     description: "Add a concise summary before the transcription."
+  },
+  {
+    key: "summaryPromptEnabled",
+    name: "Use custom summary guidance",
+    description: "Use your summary prompt to focus tone, context, themes, highlights, and action items."
+  }
+];
+
+const ACTION_ITEM_TOGGLE_SETTINGS = [
+  {
+    key: "actionItemTagging",
+    name: "Tag action items",
+    description: "When clear meeting action items are present, append the configured tag to those items."
   }
 ];
 
@@ -226,6 +243,10 @@ class HandwritingPdfPlugin extends Plugin {
       sourceName: pdfFile.basename,
       includeSummary: this.settings.includeSummary,
       summaryWordLimit: this.settings.summaryWordLimit,
+      summaryPromptEnabled: this.settings.summaryPromptEnabled,
+      summaryPrompt: this.settings.summaryPrompt,
+      actionItemTagging: this.settings.actionItemTagging,
+      actionItemTag: this.settings.actionItemTag,
       ocrDetail,
       structureHints
     });
@@ -430,6 +451,17 @@ class HandwritingPdfSettingTab extends PluginSettingTab {
         await this.plugin.saveSettings();
       }
     });
+
+    addTextAreaSetting(containerEl, {
+      name: "Summary guidance",
+      description: "Used when custom summary guidance is enabled. Keep this focused on the summary style and content you want.",
+      placeholder: DEFAULT_SETTINGS.summaryPrompt,
+      value: this.plugin.settings.summaryPrompt,
+      onChange: async (value) => {
+        this.plugin.settings.summaryPrompt = value.trim() || DEFAULT_SETTINGS.summaryPrompt;
+        await this.plugin.saveSettings();
+      }
+    });
   }
 
   renderOcrSettings(containerEl) {
@@ -438,6 +470,18 @@ class HandwritingPdfSettingTab extends PluginSettingTab {
 
   renderNoteSettings(containerEl) {
     addBoundToggleSettings(containerEl, this.plugin, NOTE_TOGGLE_SETTINGS);
+    addBoundToggleSettings(containerEl, this.plugin, ACTION_ITEM_TOGGLE_SETTINGS);
+
+    addTextSetting(containerEl, {
+      name: "Action item tag",
+      description: "Added to clear action items when action item tagging is enabled.",
+      placeholder: DEFAULT_SETTINGS.actionItemTag,
+      value: this.plugin.settings.actionItemTag,
+      onChange: async (value) => {
+        this.plugin.settings.actionItemTag = normalizeActionItemTag(value) || DEFAULT_SETTINGS.actionItemTag;
+        await this.plugin.saveSettings();
+      }
+    });
   }
 }
 
@@ -452,6 +496,31 @@ function addTextSetting(containerEl, { name, description, placeholder, value, pa
         .setValue(value)
         .onChange(onChange);
     });
+}
+
+function addTextAreaSetting(containerEl, { name, description, placeholder, value, onChange }) {
+  const setting = new Setting(containerEl)
+    .setName(name)
+    .setDesc(description);
+
+  if (typeof setting.addTextArea === "function") {
+    setting.addTextArea((text) => {
+      text
+        .setPlaceholder(placeholder)
+        .setValue(value)
+        .onChange(onChange);
+      text.inputEl.rows = 4;
+      text.inputEl.addClass("handwriting-pdf-textarea");
+    });
+    return;
+  }
+
+  setting.addText((text) => {
+    text
+      .setPlaceholder(placeholder)
+      .setValue(value)
+      .onChange(onChange);
+  });
 }
 
 function addToggleSetting(containerEl, { name, description, value, onChange }) {
@@ -661,9 +730,14 @@ function buildExtractionPrompt({
   sourceName,
   includeSummary,
   summaryWordLimit,
+  summaryPromptEnabled = true,
+  summaryPrompt = DEFAULT_SETTINGS.summaryPrompt,
+  actionItemTagging = true,
+  actionItemTag = DEFAULT_SETTINGS.actionItemTag,
   ocrDetail,
   structureHints = {}
 }) {
+  const normalizedActionItemTag = normalizeActionItemTag(actionItemTag) || DEFAULT_SETTINGS.actionItemTag;
   const lines = [
     "You are transcribing a handwritten note PDF for an Obsidian vault.",
     "Read the handwriting from the visible PDF pages. The visual page content is the source of truth.",
@@ -681,6 +755,13 @@ function buildExtractionPrompt({
     "- markdown: the full transcription as Obsidian-friendly Markdown.",
   ];
 
+  lines.push(...buildSummaryGuidancePromptLines({
+    includeSummary,
+    summaryPromptEnabled,
+    summaryPrompt,
+    summaryWordLimit
+  }));
+  lines.push(...buildActionItemPromptLines({ actionItemTagging, actionItemTag: normalizedActionItemTag }));
   lines.push(...buildOcrDetailPromptLines(ocrDetail));
   lines.push(...buildStructureHintPromptLines(structureHints));
 
@@ -688,9 +769,11 @@ function buildExtractionPrompt({
     "Markdown requirements:",
     "- Always return readable, well-structured Markdown rather than a raw OCR dump.",
     "- Preserve clear headings, indentation, bullets, numbering, checkboxes, paragraph grouping, and emphasis when they are visible or strongly implied by the handwritten layout.",
-    "- Use Markdown headings and bold text to reflect visible note hierarchy and emphasized terms, but do not add emphasis for new interpretation or editorial tone.",
+    "- Use Markdown headings, bold text, and italic text to reflect visible note hierarchy, labels, emphasized terms, definitions, and important phrases when doing so improves clarity.",
+    "- Do not add duplicate title headings, duplicate section headings, or repeated labels that the final note wrapper already provides.",
     "- Preserve the original reading order. When a page boundary is meaningful, add a subtle `### Page N` heading.",
     "- Correct obvious spelling, grammar, capitalization, and punctuation errors only when the correction is clear from context and improves readability.",
+    "- End every complete sentence with a period. Do not force periods onto headings, tags, URLs, table separators, abbreviations, or intentionally short labels/fragments.",
     "- Preserve the original meaning. Do not rewrite ideas, summarize the transcription, normalize specialized wording, or add content that is not present in the note.",
     "- Use the local formatting preflight rules above for extra table, list, and math handling so higher-effort structure work is only used when detected or clearly visible.",
     "- Keep uncertain words in [unclear] brackets instead of inventing content.",
@@ -700,6 +783,38 @@ function buildExtractionPrompt({
   );
 
   return lines.join("\n");
+}
+
+function buildSummaryGuidancePromptLines({ includeSummary, summaryPromptEnabled, summaryPrompt, summaryWordLimit }) {
+  if (!includeSummary) return [];
+
+  const guidance = summaryPromptEnabled
+    ? String(summaryPrompt || DEFAULT_SETTINGS.summaryPrompt).trim()
+    : DEFAULT_SETTINGS.summaryPrompt;
+
+  return [
+    "",
+    "Summary requirements:",
+    `- Keep the summary under ${summaryWordLimit} words.`,
+    "- Make it relevant, detailed, and short enough to scan quickly.",
+    "- Include useful context for action items, major themes, and highlights when they are present in the note.",
+    "- Keep the same tone and meaning as the handwritten note; do not add conclusions or advice not present in the note.",
+    `- User summary guidance: ${guidance}`,
+    ""
+  ];
+}
+
+function buildActionItemPromptLines({ actionItemTagging, actionItemTag }) {
+  if (!actionItemTagging) return [];
+
+  return [
+    "",
+    "Action item tracking:",
+    `- When the note contains clear meeting action items, tasks, next steps, or assigned follow-ups, preserve them as Markdown bullets and append ${actionItemTag} to each action item.`,
+    `- Use ${actionItemTag} only for action items that are actually present or strongly implied by the handwritten note. Do not invent tasks.`,
+    "- If a note has no clear action items, do not add action-item bullets just to use the tag.",
+    ""
+  ];
 }
 
 function buildStructureHintPromptLines(structureHints) {
@@ -812,28 +927,116 @@ function buildMarkdownNote({ pdfFile, embeddedPdfFile, noteTitle, result, model,
   const sections = [];
   const sourceLink = `[[${pdfFile.path}]]`;
   const embeddedLink = `[[${embeddedPdfFile.path}]]`;
-  const pdfReference = embedPdf ? `![[${embeddedPdfFile.path}]]` : embeddedLink;
+  const pdfReference = embedPdf ? `![[${embeddedPdfFile.path}]]` : sourceLink;
+  const cleanedSummary = cleanGeneratedSummary(result.summary);
+  const cleanedTranscription = cleanGeneratedTranscription(result.markdown, {
+    noteTitle,
+    title: result.title
+  });
 
   sections.push(`# ${noteTitle}`);
 
   if (includeFrontmatter) {
-    sections.push([
+    const details = [
       "## Details",
       `- Source PDF: ${sourceLink}`,
-      `- Linked PDF: ${embeddedLink}`,
       `- OCR model: \`${model}\``,
-      `- Created: ${window.moment().format("YYYY-MM-DDTHH:mm:ssZ")}`
-    ].join("\n"));
+      `- Note title format: YYYY-MM-DD - Note Title`
+    ];
+    if (embeddedPdfFile.path !== pdfFile.path) {
+      details.splice(2, 0, `- OCR-enhanced PDF: ${embeddedLink}`);
+    }
+    sections.push(details.join("\n"));
+  } else if (!embedPdf) {
+    sections.push(`Source PDF: ${sourceLink}`);
   }
 
-  if (includeSummary && result.summary) {
-    sections.push(["## Summary", result.summary].join("\n\n"));
+  if (includeSummary && cleanedSummary) {
+    sections.push(["## Summary", cleanedSummary].join("\n\n"));
   }
 
-  sections.push(["## Transcription", result.markdown || "_No transcription returned._"].join("\n\n"));
+  sections.push(["## Transcription", cleanedTranscription || "_No transcription returned._"].join("\n\n"));
   sections.push(["## Source PDF", pdfReference].join("\n\n"));
 
   return `${sections.join("\n\n")}\n`;
+}
+
+function cleanGeneratedSummary(summary) {
+  return stripLeadingWrapperLines(summary, {
+    titles: [],
+    sectionHeadings: ["summary"]
+  });
+}
+
+function cleanGeneratedTranscription(markdown, { noteTitle, title }) {
+  return stripLeadingWrapperLines(markdown, {
+    titles: [noteTitle, title],
+    sectionHeadings: ["details", "summary", "transcription", "source pdf", "source"]
+  });
+}
+
+function stripLeadingWrapperLines(value, { titles, sectionHeadings }) {
+  const lines = String(value || "").trim().split("\n");
+  const titleSet = new Set(titles.map(normalizeHeadingText).filter(Boolean));
+  const sectionSet = new Set(sectionHeadings.map(normalizeHeadingText));
+
+  while (stripNextWrapperLine(lines, titleSet, sectionSet)) {}
+
+  return lines.join("\n").trim();
+}
+
+function stripNextWrapperLine(lines, titleSet, sectionSet) {
+  if (!lines.length) return false;
+
+  const line = lines[0].trim();
+  if (!line) {
+    lines.shift();
+    return true;
+  }
+
+  if (line === "---") {
+    removeYamlFrontmatter(lines);
+    return true;
+  }
+
+  if (isDuplicateWrapperLine(line, titleSet, sectionSet)) {
+    lines.shift();
+    return true;
+  }
+
+  return false;
+}
+
+function isDuplicateWrapperLine(line, titleSet, sectionSet) {
+  const headingText = getMarkdownHeadingText(line);
+  const normalizedHeading = normalizeHeadingText(headingText);
+  if (normalizedHeading) {
+    return titleSet.has(normalizedHeading) || sectionSet.has(normalizedHeading);
+  }
+
+  return titleSet.has(normalizeHeadingText(line));
+}
+
+function removeYamlFrontmatter(lines) {
+  lines.shift();
+  while (lines.length && lines[0].trim() !== "---") {
+    lines.shift();
+  }
+  if (lines[0]?.trim() === "---") lines.shift();
+}
+
+function getMarkdownHeadingText(line) {
+  const match = String(line || "").match(/^#{1,6}\s+(.+?)\s*#*$/);
+  return match ? match[1] : "";
+}
+
+function normalizeHeadingText(value) {
+  return String(value || "")
+    .replace(/^\d{4}-\d{2}-\d{2}\s*-\s*/, "")
+    .replace(/[*_`[\]()#:.!?,;-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
 }
 
 function normalizeMarkdownTables(markdown) {
@@ -1100,6 +1303,13 @@ function isPdfFile(file) {
 
 function normalizeOutputFolder(folder) {
   return normalizePath(folder || "").replace(/^\/+|\/+$/g, "");
+}
+
+function normalizeActionItemTag(value) {
+  const tag = String(value || "").trim().replace(/\s+/g, "");
+  if (!tag) return "";
+  const normalized = tag.startsWith("#") ? tag : `#${tag}`;
+  return normalized.replace(/[^#A-Za-z0-9/_-]/g, "");
 }
 
 function normalizeDate(value) {
