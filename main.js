@@ -242,9 +242,7 @@ class HandwritingPdfPlugin extends Plugin {
     const embeddedPdfFile = await this.getInitialEmbeddedPdfFile(conversion, createOcrAfterNote, timings, notice);
 
     notice.setMessage("Handwriting PDF: creating Markdown note...");
-    const notePath = await this.writeMarkdownNote(conversion.pdfFile, embeddedPdfFile, conversion.result, {
-      ocrPending: createOcrAfterNote
-    });
+    const notePath = await this.writeMarkdownNote(conversion.pdfFile, embeddedPdfFile, conversion.result);
     timings.mark("writeMarkdown");
 
     return { notePath, createOcrAfterNote };
@@ -413,7 +411,7 @@ class HandwritingPdfPlugin extends Plugin {
     throw new Error("This Obsidian version does not support binary PDF creation.");
   }
 
-  async writeMarkdownNote(pdfFile, embeddedPdfFile, result, options = {}) {
+  async writeMarkdownNote(pdfFile, embeddedPdfFile, result) {
     const { noteTitle, outputName } = this.getGeneratedNoteNaming(pdfFile, result);
     const folder = normalizeOutputFolder(this.settings.outputFolder);
     const notePath = await this.getAvailablePath(folder ? `${folder}/${outputName}` : outputName);
@@ -421,12 +419,10 @@ class HandwritingPdfPlugin extends Plugin {
       pdfFile,
       noteTitle,
       result,
-      model: this.settings.model,
       embeddedPdfFile,
       includeSummary: this.settings.includeSummary,
       includeFrontmatter: this.settings.includeFrontmatter,
-      embedPdf: this.settings.embedPdf,
-      ocrPending: options.ocrPending === true
+      embedPdf: this.settings.embedPdf
     });
 
     if (folder) await ensureFolder(this.app, folder);
@@ -448,12 +444,10 @@ class HandwritingPdfPlugin extends Plugin {
       pdfFile,
       noteTitle,
       result,
-      model: this.settings.model,
       embeddedPdfFile,
       includeSummary: this.settings.includeSummary,
       includeFrontmatter: this.settings.includeFrontmatter,
-      embedPdf: this.settings.embedPdf,
-      ocrPending: false
+      embedPdf: this.settings.embedPdf
     });
 
     await this.app.vault.modify(noteFile, markdown);
@@ -1079,7 +1073,7 @@ function parseGeminiResponse(json) {
   }
 }
 
-function buildMarkdownNote({ pdfFile, embeddedPdfFile, noteTitle, result, model, includeSummary, includeFrontmatter, embedPdf, ocrPending = false }) {
+function buildMarkdownNote({ pdfFile, embeddedPdfFile, noteTitle, result, includeSummary, includeFrontmatter, embedPdf }) {
   const sections = [];
   const sourceLink = `[[${pdfFile.path}]]`;
   const embeddedLink = `[[${embeddedPdfFile.path}]]`;
@@ -1095,10 +1089,8 @@ function buildMarkdownNote({ pdfFile, embeddedPdfFile, noteTitle, result, model,
     sourceLink,
     embeddedLink,
     hasOcrPdf: embeddedPdfFile.path !== pdfFile.path,
-    model,
     includeFrontmatter,
-    embedPdf,
-    ocrPending
+    embedPdf
   });
 
   if (includeSummary && cleanedSummary) {
@@ -1111,27 +1103,25 @@ function buildMarkdownNote({ pdfFile, embeddedPdfFile, noteTitle, result, model,
   return `${sections.join("\n\n")}\n`;
 }
 
-function addDetailsSection(sections, { sourceLink, embeddedLink, hasOcrPdf, model, includeFrontmatter, embedPdf, ocrPending }) {
+function addDetailsSection(sections, { sourceLink, embeddedLink, hasOcrPdf, includeFrontmatter, embedPdf }) {
   if (includeFrontmatter) {
-    sections.push(buildDetailsSection({ sourceLink, embeddedLink, hasOcrPdf, model, ocrPending }));
+    sections.push(buildDetailsSection({ sourceLink, embeddedLink, hasOcrPdf }));
     return;
   }
 
   if (!embedPdf) sections.push(`Source PDF: ${sourceLink}`);
 }
 
-function buildDetailsSection({ sourceLink, embeddedLink, hasOcrPdf, model, ocrPending }) {
+function buildDetailsSection({ sourceLink, embeddedLink, hasOcrPdf }) {
   return [
     "## Details",
     `- Source PDF: ${sourceLink}`,
-    buildOcrPdfDetailLine({ embeddedLink, hasOcrPdf, ocrPending }),
-    `- OCR model: \`${model}\``
+    buildOcrPdfDetailLine({ embeddedLink, hasOcrPdf })
   ].filter(Boolean).join("\n");
 }
 
-function buildOcrPdfDetailLine({ embeddedLink, hasOcrPdf, ocrPending }) {
+function buildOcrPdfDetailLine({ embeddedLink, hasOcrPdf }) {
   if (hasOcrPdf) return `- OCR-enhanced PDF: ${embeddedLink}`;
-  if (ocrPending) return "- OCR-enhanced PDF: pending";
   return "";
 }
 

@@ -4,7 +4,7 @@ Turn handwritten PDF notes into clean Obsidian notes without doing the copy-past
 
 Handwriting PDF is a small Obsidian plugin for those PDFs that are full of useful handwritten notes but are annoying to search, skim, or reuse. Pick a PDF, run the plugin, and it asks Gemini to read the handwriting, clean up the obvious typos and punctuation, preserve the structure it can understand, and drop everything into a fresh Markdown note.
 
-Current version: `0.1.19`.
+Current version: `0.1.20`.
 
 This project was built in collaboration with AI using OpenAI Codex.
 
@@ -48,7 +48,6 @@ Generated notes are meant to be easy to scan:
 
 ## Details
 - Source PDF: [[example.pdf]]
-- OCR model: `gemini-3.1-flash-lite`
 
 ## Summary
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.20
+
+- Removed the pending OCR-enhanced PDF placeholder from generated note details.
+- Removed the OCR model line from generated note details.
+- Kept the completed OCR-enhanced PDF link when the background OCR PDF is successfully created.
+
 ## 0.1.19
 
 - Added a customizable note title format setting with `YYYY-MM-DD - NoteTitle` as the default.
