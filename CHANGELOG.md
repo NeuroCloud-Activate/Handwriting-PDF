@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.17
+
+- Made OCR-enhanced PDF creation enabled by default.
+- Added a default-on option to create the OCR-enhanced PDF after the Markdown note is created.
+- Added a visible OCR text layer mode setting with fast **Searchable text only** as the default.
+- Updated OCR planning so PDFs with an existing text layer never request positioned Gemini coordinates.
+- Reduced default Gemini payload for searchable OCR PDFs by using cleaned transcription/page text instead of requesting extra OCR page data.
+
 ## 0.1.16
 
 - Added default-on customizable summary guidance for tone, focus, action-item context, major themes, and highlights.

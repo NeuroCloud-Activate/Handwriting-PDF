@@ -37,7 +37,8 @@ const DEFAULT_SETTINGS = {
   summaryPrompt: "Write a short, useful summary that stays faithful to the note. Focus on major themes, key highlights, useful context, and any clear action items without adding new interpretation.",
   actionItemTagging: true,
   actionItemTag: "#Todo",
-  createOcrPdf: false,
+  createOcrPdf: true,
+  createOcrPdfAfterNote: true,
   autoDetectTextLayer: true,
   alwaysRequestPositionedOcr: false,
   ocrTextLayerMode: "searchable",
@@ -71,17 +72,35 @@ const OCR_TOGGLE_SETTINGS = [
   {
     key: "createOcrPdf",
     name: "Create OCR-enhanced PDF",
-    description: "When enabled, creates a copy of the PDF with an invisible Gemini text layer and uses that copy in the generated note."
+    description: "Enabled by default. Creates a PDF copy with an invisible searchable text layer."
+  },
+  {
+    key: "createOcrPdfAfterNote",
+    name: "Create OCR PDF after note creation",
+    description: "Enabled by default. Creates the Markdown note first, then adds the OCR-enhanced PDF in the background."
   },
   {
     key: "autoDetectTextLayer",
     name: "Auto-detect existing PDF text layer",
-    description: "When enabled, image-only PDFs request positioned line data, while PDFs that already have a text layer use faster page text. When disabled, OCR-enhanced PDFs use faster page text unless positioned layout is forced."
+    description: "Keeps PDFs with an existing text layer on the faster searchable path and avoids requesting positioned coordinates."
   },
   {
     key: "alwaysRequestPositionedOcr",
-    name: "Always request positioned OCR layout",
-    description: "Disabled by default. When enabled, Gemini returns page text and line coordinates for every PDF, even when an existing text layer is detected."
+    name: "Prefer positioned OCR for image-only PDFs",
+    description: "Disabled by default. When enabled, image-only PDFs request line coordinates. PDFs with an existing text layer still use the faster searchable path."
+  }
+];
+
+const OCR_TEXT_LAYER_MODE_OPTIONS = [
+  {
+    id: "searchable",
+    name: "Searchable text only",
+    description: "Fastest. Uses cleaned transcription/page text without asking Gemini for line coordinates."
+  },
+  {
+    id: "positioned",
+    name: "Positioned line layer",
+    description: "Slower. Requests line coordinates only for PDFs without an existing text layer."
   }
 ];
 
@@ -121,11 +140,9 @@ class HandwritingPdfPlugin extends Plugin {
   async onload() {
     const savedSettings = await this.loadData();
     this.settings = Object.assign({}, DEFAULT_SETTINGS, savedSettings);
-    if (savedSettings?.createOcrPdf !== true && savedSettings?.ocrTextLayerMode === "positioned") {
-      this.settings.ocrTextLayerMode = "searchable";
-    }
+    this.settings.ocrTextLayerMode = normalizeOcrTextLayerMode(this.settings.ocrTextLayerMode);
 
-    if (!savedSettings || savedSettings?.ocrTextLayerMode !== this.settings.ocrTextLayerMode) {
+    if (!savedSettings || savedSettings?.ocrTextLayerMode !== this.settings.ocrTextLayerMode || savedSettings?.createOcrPdfAfterNote === undefined) {
       await this.saveSettings();
     }
 
@@ -190,46 +207,9 @@ class HandwritingPdfPlugin extends Plugin {
     const notice = new Notice("Handwriting PDF: reading PDF...", 0);
 
     try {
-      const pdfData = await this.app.vault.readBinary(pdfFile);
-      timings.mark("readPdf");
-
-      const base64Pdf = arrayBufferToBase64(pdfData);
-      timings.mark("encodePdf");
-
-      const pdfSignals = analyzePdfSignals(pdfData);
-      const hasTextOverlay = pdfSignals.hasTextOverlay;
-      timings.mark("analyzePdfStructure");
-
-      notice.setMessage("Handwriting PDF: asking Gemini to read handwriting...");
-      const result = await this.extractHandwriting(base64Pdf, pdfFile, hasTextOverlay, pdfSignals.structureHints);
-      timings.mark("geminiRequest");
-
-      let embeddedPdfFile = pdfFile;
-      if (this.settings.createOcrPdf) {
-        notice.setMessage("Handwriting PDF: creating OCR text layer...");
-        embeddedPdfFile = await this.writeOcrPdf(pdfFile, pdfData, result, result.ocrDetail);
-        timings.mark("writeOcrPdf");
-      }
-
-      notice.setMessage("Handwriting PDF: creating Markdown note...");
-      const notePath = await this.writeMarkdownNote(pdfFile, embeddedPdfFile, result);
-      timings.mark("writeMarkdown");
-
-      notice.hide();
-      new Notice(`Handwriting PDF: created ${notePath}`);
-      logTimingSummary({
-        timings,
-        model: this.settings.model,
-        ocrDetail: result.ocrDetail,
-        hasTextOverlay,
-        structureHints: pdfSignals.structureHints,
-        createOcrPdf: this.settings.createOcrPdf
-      });
-
-      const noteFile = this.app.vault.getAbstractFileByPath(notePath);
-      if (noteFile instanceof TFile) {
-        await this.app.workspace.getLeaf(false).openFile(noteFile);
-      }
+      const conversion = await this.preparePdfConversion(pdfFile, timings, notice);
+      const output = await this.writeInitialOutputs(conversion, timings, notice);
+      await this.finishSuccessfulConversion(conversion, output, timings, notice);
     } catch (error) {
       notice.hide();
       console.error(error);
@@ -237,8 +217,82 @@ class HandwritingPdfPlugin extends Plugin {
     }
   }
 
-  async extractHandwriting(base64Pdf, pdfFile, hasTextOverlay, structureHints) {
-    const ocrDetail = getOcrDetailLevel(this.settings, hasTextOverlay);
+  async preparePdfConversion(pdfFile, timings, notice) {
+    const pdfData = await this.app.vault.readBinary(pdfFile);
+    timings.mark("readPdf");
+
+    const base64Pdf = arrayBufferToBase64(pdfData);
+    timings.mark("encodePdf");
+
+    const pdfSignals = analyzePdfSignals(pdfData);
+    const hasTextOverlay = pdfSignals.hasTextOverlay;
+    const ocrPlan = getOcrPlan(this.settings, hasTextOverlay);
+    timings.mark("analyzePdfStructure");
+
+    notice.setMessage("Handwriting PDF: asking Gemini to read handwriting...");
+    const result = await this.extractHandwriting({ base64Pdf, pdfFile, hasTextOverlay, structureHints: pdfSignals.structureHints, ocrPlan });
+    timings.mark("geminiRequest");
+
+    return { pdfFile, pdfData, pdfSignals, hasTextOverlay, ocrPlan, result };
+  }
+
+  async writeInitialOutputs(conversion, timings, notice) {
+    const createOcrAfterNote = conversion.ocrPlan.shouldCreate && this.settings.createOcrPdfAfterNote;
+    const embeddedPdfFile = await this.getInitialEmbeddedPdfFile(conversion, createOcrAfterNote, timings, notice);
+
+    notice.setMessage("Handwriting PDF: creating Markdown note...");
+    const notePath = await this.writeMarkdownNote(conversion.pdfFile, embeddedPdfFile, conversion.result, {
+      ocrPending: createOcrAfterNote
+    });
+    timings.mark("writeMarkdown");
+
+    return { notePath, createOcrAfterNote };
+  }
+
+  async getInitialEmbeddedPdfFile(conversion, createOcrAfterNote, timings, notice) {
+    if (!conversion.ocrPlan.shouldCreate || createOcrAfterNote) return conversion.pdfFile;
+
+    notice.setMessage("Handwriting PDF: creating OCR text layer...");
+    const embeddedPdfFile = await this.writeOcrPdf(conversion.pdfFile, conversion.pdfData, conversion.result, conversion.ocrPlan.overlayMode);
+    timings.mark("writeOcrPdf");
+    return embeddedPdfFile;
+  }
+
+  async finishSuccessfulConversion(conversion, output, timings, notice) {
+    notice.hide();
+    new Notice(output.createOcrAfterNote ? `Handwriting PDF: created ${output.notePath}; OCR PDF queued.` : `Handwriting PDF: created ${output.notePath}`);
+    logTimingSummary({
+      timings,
+      model: this.settings.model,
+      ocrDetail: conversion.ocrPlan.requestDetail,
+      ocrOverlayMode: conversion.ocrPlan.overlayMode,
+      hasTextOverlay: conversion.hasTextOverlay,
+      structureHints: conversion.pdfSignals.structureHints,
+      createOcrPdf: this.settings.createOcrPdf
+    });
+
+    await this.openGeneratedNote(output.notePath);
+
+    if (output.createOcrAfterNote) {
+      this.createOcrPdfInBackground({
+        pdfFile: conversion.pdfFile,
+        pdfData: conversion.pdfData,
+        result: conversion.result,
+        notePath: output.notePath,
+        ocrPlan: conversion.ocrPlan
+      });
+    }
+  }
+
+  async openGeneratedNote(notePath) {
+    const noteFile = this.app.vault.getAbstractFileByPath(notePath);
+    if (noteFile instanceof TFile) {
+      await this.app.workspace.getLeaf(false).openFile(noteFile);
+    }
+  }
+
+  async extractHandwriting({ base64Pdf, pdfFile, hasTextOverlay, structureHints, ocrPlan = getOcrPlan(this.settings, hasTextOverlay) }) {
+    const ocrDetail = ocrPlan.requestDetail;
     const prompt = buildExtractionPrompt({
       sourceName: pdfFile.basename,
       includeSummary: this.settings.includeSummary,
@@ -284,8 +338,30 @@ class HandwritingPdfPlugin extends Plugin {
 
     const result = parseGeminiResponse(response.json);
     result.ocrDetail = ocrDetail;
+    result.ocrOverlayMode = ocrPlan.overlayMode;
     result.hasSourceTextOverlay = hasTextOverlay;
     return result;
+  }
+
+  createOcrPdfInBackground({ pdfFile, pdfData, result, notePath, ocrPlan }) {
+    const backgroundTimings = createTimingTracker();
+    this.finishBackgroundOcrPdf({ pdfFile, pdfData, result, notePath, ocrPlan, backgroundTimings }).catch((error) => {
+      console.error(error);
+      new Notice(`Handwriting PDF: OCR PDF creation failed: ${getErrorMessage(error)}`);
+    });
+  }
+
+  async finishBackgroundOcrPdf({ pdfFile, pdfData, result, notePath, ocrPlan, backgroundTimings }) {
+    const embeddedPdfFile = await this.writeOcrPdf(pdfFile, pdfData, result, ocrPlan.overlayMode);
+    backgroundTimings.mark("writeOcrPdfBackground");
+    await this.updateMarkdownNotePdf(pdfFile, embeddedPdfFile, result, notePath);
+    backgroundTimings.mark("updateMarkdownNote");
+    new Notice("Handwriting PDF: OCR-enhanced PDF created.");
+    console.info("Handwriting PDF background OCR timing", {
+      totalMs: backgroundTimings.summary().totalMs,
+      ocrOverlayMode: ocrPlan.overlayMode,
+      stages: backgroundTimings.summary().stages
+    });
   }
 
   async writeOcrPdf(sourcePdfFile, sourcePdfData, result, ocrDetail) {
@@ -334,7 +410,7 @@ class HandwritingPdfPlugin extends Plugin {
     throw new Error("This Obsidian version does not support binary PDF creation.");
   }
 
-  async writeMarkdownNote(pdfFile, embeddedPdfFile, result) {
+  async writeMarkdownNote(pdfFile, embeddedPdfFile, result, options = {}) {
     const date = normalizeDate(result.date) || window.moment().format("YYYY-MM-DD");
     const title = sanitizeTitle(result.title || pdfFile.basename);
     const outputName = `${date} - ${title}.md`;
@@ -348,7 +424,8 @@ class HandwritingPdfPlugin extends Plugin {
       embeddedPdfFile,
       includeSummary: this.settings.includeSummary,
       includeFrontmatter: this.settings.includeFrontmatter,
-      embedPdf: this.settings.embedPdf
+      embedPdf: this.settings.embedPdf,
+      ocrPending: options.ocrPending === true
     });
 
     if (folder) await ensureFolder(this.app, folder);
@@ -359,6 +436,27 @@ class HandwritingPdfPlugin extends Plugin {
       await this.app.vault.create(notePath, markdown);
     }
     return notePath;
+  }
+
+  async updateMarkdownNotePdf(pdfFile, embeddedPdfFile, result, notePath) {
+    const noteFile = this.app.vault.getAbstractFileByPath(notePath);
+    if (!(noteFile instanceof TFile)) return;
+
+    const date = normalizeDate(result.date) || window.moment().format("YYYY-MM-DD");
+    const title = sanitizeTitle(result.title || pdfFile.basename);
+    const markdown = buildMarkdownNote({
+      pdfFile,
+      noteTitle: `${date} - ${title}`,
+      result,
+      model: this.settings.model,
+      embeddedPdfFile,
+      includeSummary: this.settings.includeSummary,
+      includeFrontmatter: this.settings.includeFrontmatter,
+      embedPdf: this.settings.embedPdf,
+      ocrPending: false
+    });
+
+    await this.app.vault.modify(noteFile, markdown);
   }
 
   async getAvailablePath(path) {
@@ -466,6 +564,17 @@ class HandwritingPdfSettingTab extends PluginSettingTab {
 
   renderOcrSettings(containerEl) {
     addBoundToggleSettings(containerEl, this.plugin, OCR_TOGGLE_SETTINGS);
+
+    addDropdownSetting(containerEl, {
+      name: "OCR text layer mode",
+      description: "Choose how the optional OCR-enhanced PDF text layer is created.",
+      options: OCR_TEXT_LAYER_MODE_OPTIONS,
+      value: normalizeOcrTextLayerMode(this.plugin.settings.ocrTextLayerMode),
+      onChange: async (value) => {
+        this.plugin.settings.ocrTextLayerMode = normalizeOcrTextLayerMode(value);
+        await this.plugin.saveSettings();
+      }
+    });
   }
 
   renderNoteSettings(containerEl) {
@@ -598,11 +707,36 @@ function sleep(ms) {
 }
 
 function getOcrDetailLevel(settings, hasTextOverlay) {
-  if (!settings.createOcrPdf) return "none";
-  if (settings.alwaysRequestPositionedOcr) return "positioned";
-  if (settings.autoDetectTextLayer && hasTextOverlay) return "searchable";
-  if (settings.autoDetectTextLayer && !hasTextOverlay) return "positioned";
+  return getOcrPlan(settings, hasTextOverlay).requestDetail;
+}
+
+function getOcrPlan(settings, hasTextOverlay) {
+  if (!settings.createOcrPdf) {
+    return {
+      shouldCreate: false,
+      requestDetail: "none",
+      overlayMode: "none"
+    };
+  }
+
+  const overlayMode = getOcrOverlayMode(settings, hasTextOverlay);
+  return {
+    shouldCreate: true,
+    requestDetail: overlayMode === "positioned" ? "positioned" : "none",
+    overlayMode
+  };
+}
+
+function getOcrOverlayMode(settings, hasTextOverlay) {
+  if (hasTextOverlay) return "searchable";
+
+  const mode = normalizeOcrTextLayerMode(settings.ocrTextLayerMode);
+  if (mode === "positioned" || settings.alwaysRequestPositionedOcr === true) return "positioned";
   return "searchable";
+}
+
+function normalizeOcrTextLayerMode(value) {
+  return value === "positioned" ? "positioned" : "searchable";
 }
 
 function buildThinkingConfig(model) {
@@ -923,7 +1057,7 @@ function parseGeminiResponse(json) {
   }
 }
 
-function buildMarkdownNote({ pdfFile, embeddedPdfFile, noteTitle, result, model, includeSummary, includeFrontmatter, embedPdf }) {
+function buildMarkdownNote({ pdfFile, embeddedPdfFile, noteTitle, result, model, includeSummary, includeFrontmatter, embedPdf, ocrPending = false }) {
   const sections = [];
   const sourceLink = `[[${pdfFile.path}]]`;
   const embeddedLink = `[[${embeddedPdfFile.path}]]`;
@@ -935,21 +1069,15 @@ function buildMarkdownNote({ pdfFile, embeddedPdfFile, noteTitle, result, model,
   });
 
   sections.push(`# ${noteTitle}`);
-
-  if (includeFrontmatter) {
-    const details = [
-      "## Details",
-      `- Source PDF: ${sourceLink}`,
-      `- OCR model: \`${model}\``,
-      `- Note title format: YYYY-MM-DD - Note Title`
-    ];
-    if (embeddedPdfFile.path !== pdfFile.path) {
-      details.splice(2, 0, `- OCR-enhanced PDF: ${embeddedLink}`);
-    }
-    sections.push(details.join("\n"));
-  } else if (!embedPdf) {
-    sections.push(`Source PDF: ${sourceLink}`);
-  }
+  addDetailsSection(sections, {
+    sourceLink,
+    embeddedLink,
+    hasOcrPdf: embeddedPdfFile.path !== pdfFile.path,
+    model,
+    includeFrontmatter,
+    embedPdf,
+    ocrPending
+  });
 
   if (includeSummary && cleanedSummary) {
     sections.push(["## Summary", cleanedSummary].join("\n\n"));
@@ -959,6 +1087,31 @@ function buildMarkdownNote({ pdfFile, embeddedPdfFile, noteTitle, result, model,
   sections.push(["## Source PDF", pdfReference].join("\n\n"));
 
   return `${sections.join("\n\n")}\n`;
+}
+
+function addDetailsSection(sections, { sourceLink, embeddedLink, hasOcrPdf, model, includeFrontmatter, embedPdf, ocrPending }) {
+  if (includeFrontmatter) {
+    sections.push(buildDetailsSection({ sourceLink, embeddedLink, hasOcrPdf, model, ocrPending }));
+    return;
+  }
+
+  if (!embedPdf) sections.push(`Source PDF: ${sourceLink}`);
+}
+
+function buildDetailsSection({ sourceLink, embeddedLink, hasOcrPdf, model, ocrPending }) {
+  return [
+    "## Details",
+    `- Source PDF: ${sourceLink}`,
+    buildOcrPdfDetailLine({ embeddedLink, hasOcrPdf, ocrPending }),
+    `- OCR model: \`${model}\``,
+    "- Note title format: YYYY-MM-DD - Note Title"
+  ].filter(Boolean).join("\n");
+}
+
+function buildOcrPdfDetailLine({ embeddedLink, hasOcrPdf, ocrPending }) {
+  if (hasOcrPdf) return `- OCR-enhanced PDF: ${embeddedLink}`;
+  if (ocrPending) return "- OCR-enhanced PDF: pending";
+  return "";
 }
 
 function cleanGeneratedSummary(summary) {
@@ -1256,22 +1409,31 @@ function sanitizePdfText(value) {
 }
 
 function wrapTextForPdf(text, maxChars) {
-  const output = [];
-  for (const paragraph of String(text || "").split(/\n+/)) {
-    const words = paragraph.split(/\s+/).filter(Boolean);
-    let line = "";
-    for (const word of words) {
-      const candidate = line ? `${line} ${word}` : word;
-      if (candidate.length > maxChars && line) {
-        output.push(line);
-        line = word;
-      } else {
-        line = candidate;
-      }
+  return String(text || "")
+    .split(/\n+/)
+    .flatMap((paragraph) => wrapParagraphForPdf(paragraph, maxChars));
+}
+
+function wrapParagraphForPdf(paragraph, maxChars) {
+  const lines = [];
+  let line = "";
+
+  for (const word of paragraph.split(/\s+/).filter(Boolean)) {
+    const candidate = line ? `${line} ${word}` : word;
+    if (shouldWrapPdfLine(candidate, line, maxChars)) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = candidate;
     }
-    if (line) output.push(line);
   }
-  return output;
+
+  if (line) lines.push(line);
+  return lines;
+}
+
+function shouldWrapPdfLine(candidate, currentLine, maxChars) {
+  return Boolean(currentLine) && candidate.length > maxChars;
 }
 
 function fitFontSize(font, text, maxWidth, preferredSize) {
@@ -1391,12 +1553,13 @@ function createTimingTracker() {
   };
 }
 
-function logTimingSummary({ timings, model, ocrDetail, hasTextOverlay, structureHints, createOcrPdf }) {
+function logTimingSummary({ timings, model, ocrDetail, ocrOverlayMode, hasTextOverlay, structureHints, createOcrPdf }) {
   const summary = timings.summary();
   console.info("Handwriting PDF timing", {
     totalMs: summary.totalMs,
     model,
     ocrDetail,
+    ocrOverlayMode,
     hasTextOverlay,
     structureHints: normalizeStructureHints(structureHints),
     createOcrPdf,
@@ -1421,6 +1584,7 @@ HandwritingPdfPlugin.__testing = {
   buildResponseSchema,
   getModelOptions,
   getOcrDetailLevel,
+  getOcrPlan,
   hasExistingPdfTextLayer,
   normalizeMarkdownTables,
   parseGeminiResponse
