@@ -261,6 +261,7 @@ class HandwritingPdfPlugin extends Plugin {
   async finishSuccessfulConversion(conversion, output, timings, notice) {
     notice.hide();
     new Notice(output.createOcrAfterNote ? `Handwriting PDF: created ${output.notePath}; OCR PDF queued.` : `Handwriting PDF: created ${output.notePath}`);
+    this.startQueuedOcrPdf(conversion, output);
     logTimingSummary({
       timings,
       model: this.settings.model,
@@ -272,16 +273,18 @@ class HandwritingPdfPlugin extends Plugin {
     });
 
     await this.openGeneratedNote(output.notePath);
+  }
 
-    if (output.createOcrAfterNote) {
-      this.createOcrPdfInBackground({
-        pdfFile: conversion.pdfFile,
-        pdfData: conversion.pdfData,
-        result: conversion.result,
-        notePath: output.notePath,
-        ocrPlan: conversion.ocrPlan
-      });
-    }
+  startQueuedOcrPdf(conversion, output) {
+    if (!output.createOcrAfterNote) return;
+
+    this.createOcrPdfInBackground({
+      pdfFile: conversion.pdfFile,
+      pdfData: conversion.pdfData,
+      result: conversion.result,
+      notePath: output.notePath,
+      ocrPlan: conversion.ocrPlan
+    });
   }
 
   async openGeneratedNote(notePath) {

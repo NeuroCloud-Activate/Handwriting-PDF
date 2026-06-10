@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.18
+
+- Started queued OCR-enhanced PDF creation as soon as the Markdown note is written, so PDF generation can overlap with opening the note in Obsidian.
+- Kept Gemini transcription as the required dependency before Markdown and OCR PDF output generation.
+- Preserved the default searchable-text-only OCR path to avoid extra Gemini coordinate payload.
+
 ## 0.1.17
 
 - Made OCR-enhanced PDF creation enabled by default.
