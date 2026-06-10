@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.19
+
+- Added a customizable note title format setting with `YYYY-MM-DD - NoteTitle` as the default.
+- Removed the note title format line from generated note details.
+- Removed duplicate model-generated title headers that appear immediately after an initial page heading.
+- Normalized nested sub-bullets and nested numbered list items to use at least four leading spaces.
+- Improved settings layout so dropdown controls do not cover setting descriptions on narrow panes.
+
 ## 0.1.18
 
 - Started queued OCR-enhanced PDF creation as soon as the Markdown note is written, so PDF generation can overlap with opening the note in Obsidian.

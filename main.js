@@ -31,6 +31,7 @@ const DEFAULT_SETTINGS = {
   apiKey: "",
   model: "gemini-3.1-flash-lite",
   outputFolder: "Handwriting PDF Notes",
+  noteTitleFormat: "YYYY-MM-DD - NoteTitle",
   includeSummary: true,
   summaryWordLimit: 200,
   summaryPromptEnabled: true,
@@ -379,11 +380,10 @@ class HandwritingPdfPlugin extends Plugin {
   }
 
   async getOcrPdfTarget(sourcePdfFile, result) {
-    const date = normalizeDate(result.date) || window.moment().format("YYYY-MM-DD");
-    const title = sanitizeTitle(result.title || sourcePdfFile.basename);
+    const { noteTitle } = this.getGeneratedNoteNaming(sourcePdfFile, result);
     const sourceTitle = sanitizeTitle(sourcePdfFile.basename);
     const folder = normalizeOutputFolder(this.settings.outputFolder);
-    const outputName = `${date} - ${title} - ${sourceTitle} OCR.pdf`;
+    const outputName = `${noteTitle} - ${sourceTitle} OCR.pdf`;
     const requestedPath = folder ? `${folder}/${outputName}` : outputName;
 
     return {
@@ -414,14 +414,12 @@ class HandwritingPdfPlugin extends Plugin {
   }
 
   async writeMarkdownNote(pdfFile, embeddedPdfFile, result, options = {}) {
-    const date = normalizeDate(result.date) || window.moment().format("YYYY-MM-DD");
-    const title = sanitizeTitle(result.title || pdfFile.basename);
-    const outputName = `${date} - ${title}.md`;
+    const { noteTitle, outputName } = this.getGeneratedNoteNaming(pdfFile, result);
     const folder = normalizeOutputFolder(this.settings.outputFolder);
     const notePath = await this.getAvailablePath(folder ? `${folder}/${outputName}` : outputName);
     const markdown = buildMarkdownNote({
       pdfFile,
-      noteTitle: `${date} - ${title}`,
+      noteTitle,
       result,
       model: this.settings.model,
       embeddedPdfFile,
@@ -445,11 +443,10 @@ class HandwritingPdfPlugin extends Plugin {
     const noteFile = this.app.vault.getAbstractFileByPath(notePath);
     if (!(noteFile instanceof TFile)) return;
 
-    const date = normalizeDate(result.date) || window.moment().format("YYYY-MM-DD");
-    const title = sanitizeTitle(result.title || pdfFile.basename);
+    const { noteTitle } = this.getGeneratedNoteNaming(pdfFile, result);
     const markdown = buildMarkdownNote({
       pdfFile,
-      noteTitle: `${date} - ${title}`,
+      noteTitle,
       result,
       model: this.settings.model,
       embeddedPdfFile,
@@ -460,6 +457,16 @@ class HandwritingPdfPlugin extends Plugin {
     });
 
     await this.app.vault.modify(noteFile, markdown);
+  }
+
+  getGeneratedNoteNaming(pdfFile, result) {
+    const date = normalizeDate(result.date) || window.moment().format("YYYY-MM-DD");
+    const title = sanitizeTitle(result.title || pdfFile.basename);
+    const noteTitle = formatNoteTitle(this.settings.noteTitleFormat, { date, title });
+    return {
+      noteTitle,
+      outputName: `${noteTitle}.md`
+    };
   }
 
   async getAvailablePath(path) {
@@ -534,6 +541,17 @@ class HandwritingPdfSettingTab extends PluginSettingTab {
         this.plugin.settings.outputFolder = value.trim();
         await this.plugin.saveSettings();
         await this.plugin.ensureOutputFolder();
+      }
+    });
+
+    addTextSetting(containerEl, {
+      name: "Note title format",
+      description: "Use YYYY-MM-DD for the note date and NoteTitle for the cleaned note title.",
+      placeholder: DEFAULT_SETTINGS.noteTitleFormat,
+      value: this.plugin.settings.noteTitleFormat,
+      onChange: async (value) => {
+        this.plugin.settings.noteTitleFormat = value.trim() || DEFAULT_SETTINGS.noteTitleFormat;
+        await this.plugin.saveSettings();
       }
     });
   }
@@ -906,6 +924,7 @@ function buildExtractionPrompt({
     "Markdown requirements:",
     "- Always return readable, well-structured Markdown rather than a raw OCR dump.",
     "- Preserve clear headings, indentation, bullets, numbering, checkboxes, paragraph grouping, and emphasis when they are visible or strongly implied by the handwritten layout.",
+    "- Use at least four leading spaces for nested sub-bullets or nested numbered list items.",
     "- Use Markdown headings, bold text, and italic text to reflect visible note hierarchy, labels, emphasized terms, definitions, and important phrases when doing so improves clarity.",
     "- Do not add duplicate title headings, duplicate section headings, or repeated labels that the final note wrapper already provides.",
     "- Preserve the original reading order. When a page boundary is meaningful, add a subtle `### Page N` heading.",
@@ -1046,7 +1065,7 @@ function parseGeminiResponse(json) {
       title: String(parsed.title || "").trim(),
       date: String(parsed.date || "").trim(),
       summary: String(parsed.summary || "").trim(),
-      markdown: normalizeMarkdownTables(String(parsed.markdown || "").trim()),
+      markdown: normalizeGeneratedMarkdown(String(parsed.markdown || "").trim()),
       pages: normalizeOcrPages(parsed.pages)
     };
   } catch (error) {
@@ -1054,7 +1073,7 @@ function parseGeminiResponse(json) {
       title: "",
       date: "",
       summary: "",
-      markdown: normalizeMarkdownTables(stripJsonFence(text)),
+      markdown: normalizeGeneratedMarkdown(stripJsonFence(text)),
       pages: []
     };
   }
@@ -1106,8 +1125,7 @@ function buildDetailsSection({ sourceLink, embeddedLink, hasOcrPdf, model, ocrPe
     "## Details",
     `- Source PDF: ${sourceLink}`,
     buildOcrPdfDetailLine({ embeddedLink, hasOcrPdf, ocrPending }),
-    `- OCR model: \`${model}\``,
-    "- Note title format: YYYY-MM-DD - Note Title"
+    `- OCR model: \`${model}\``
   ].filter(Boolean).join("\n");
 }
 
@@ -1137,8 +1155,26 @@ function stripLeadingWrapperLines(value, { titles, sectionHeadings }) {
   const sectionSet = new Set(sectionHeadings.map(normalizeHeadingText));
 
   while (stripNextWrapperLine(lines, titleSet, sectionSet)) {}
+  stripDuplicateTitleAfterLeadingPage(lines, titleSet);
 
   return lines.join("\n").trim();
+}
+
+function stripDuplicateTitleAfterLeadingPage(lines, titleSet) {
+  const pageHeadingIndex = findNextContentLine(lines, 0);
+  if (!isPageHeading(lines[pageHeadingIndex])) return;
+
+  const titleIndex = findNextContentLine(lines, pageHeadingIndex + 1);
+  if (titleIndex < 0 || !isDuplicateTitleLine(lines[titleIndex], titleSet)) return;
+
+  lines.splice(titleIndex, 1);
+}
+
+function findNextContentLine(lines, startIndex) {
+  for (let index = startIndex; index < lines.length; index += 1) {
+    if (String(lines[index] || "").trim()) return index;
+  }
+  return -1;
 }
 
 function stripNextWrapperLine(lines, titleSet, sectionSet) {
@@ -1173,6 +1209,14 @@ function isDuplicateWrapperLine(line, titleSet, sectionSet) {
   return titleSet.has(normalizeHeadingText(line));
 }
 
+function isDuplicateTitleLine(line, titleSet) {
+  return isDuplicateWrapperLine(line, titleSet, new Set());
+}
+
+function isPageHeading(line) {
+  return /^#{1,6}\s+Page\s+\d+\b/i.test(String(line || "").trim());
+}
+
 function removeYamlFrontmatter(lines) {
   lines.shift();
   while (lines.length && lines[0].trim() !== "---") {
@@ -1193,6 +1237,32 @@ function normalizeHeadingText(value) {
     .replace(/\s+/g, " ")
     .trim()
     .toLowerCase();
+}
+
+function normalizeGeneratedMarkdown(markdown) {
+  return normalizeMarkdownTables(normalizeNestedListIndentation(markdown));
+}
+
+function normalizeNestedListIndentation(markdown) {
+  return String(markdown || "")
+    .split("\n")
+    .map(normalizeNestedListLine)
+    .join("\n")
+    .trim();
+}
+
+function normalizeNestedListLine(line) {
+  const match = String(line || "").match(/^(\s+)([-*+]|\d+[.)])\s+/);
+  if (!match) return line;
+
+  const indentWidth = countIndentWidth(match[1]);
+  if (indentWidth >= 4 && !match[1].includes("\t")) return line;
+
+  return `${" ".repeat(Math.max(4, indentWidth))}${line.trimStart()}`;
+}
+
+function countIndentWidth(indent) {
+  return Array.from(String(indent || "")).reduce((width, char) => width + (char === "\t" ? 4 : 1), 0);
 }
 
 function normalizeMarkdownTables(markdown) {
@@ -1482,6 +1552,14 @@ function normalizeDate(value) {
   return match ? match[0] : "";
 }
 
+function formatNoteTitle(format, { date, title }) {
+  const template = String(format || DEFAULT_SETTINGS.noteTitleFormat).trim() || DEFAULT_SETTINGS.noteTitleFormat;
+  const formatted = template
+    .replace(/\bYYYY-MM-DD\b/g, date)
+    .replace(/\bNoteTitle\b/g, title);
+  return sanitizeTitle(formatted);
+}
+
 function sanitizeTitle(value) {
   const sanitized = String(value || "Untitled Note")
     .replace(/[\\/:*?"<>|#^[\]]+/g, " ")
@@ -1585,10 +1663,13 @@ HandwritingPdfPlugin.__testing = {
   buildThinkingConfig,
   buildExtractionPrompt,
   buildResponseSchema,
+  cleanGeneratedTranscription,
+  formatNoteTitle,
   getModelOptions,
   getOcrDetailLevel,
   getOcrPlan,
   hasExistingPdfTextLayer,
+  normalizeGeneratedMarkdown,
   normalizeMarkdownTables,
   parseGeminiResponse
 };
